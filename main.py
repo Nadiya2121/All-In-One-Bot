@@ -1,21 +1,61 @@
 # main.py
-from pyrogram import Client
-from config import API_ID, API_HASH, BOT_TOKEN
+import asyncio
+from aiohttp import web
+from pyrogram import Client, idle
+from config import API_ID, API_HASH, BOT_TOKEN, PORT
 
-print("\n" + "="*40)
+print("\n" + "="*45)
 print("     OMNICORE BOT IS INITIALIZING...     ")
-print("="*40 + "\n")
+print("="*45 + "\n")
 
-# ক্লায়েন্ট সেটআপ
+# ১. টেলিগ্রাম ক্লায়েন্ট সেটআপ
 app = Client(
     "OmniCoreSession",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    plugins=dict(root="plugins")  # 'plugins' ফোল্ডারের সবকিছু অটো কানেক্ট হবে
+    plugins=dict(root="plugins")
 )
 
+# ২. ইন্টারনাল হেলথ চেক পেজ (Koyeb-কে জাগিয়ে রাখার জন্য)
+async def web_health_check(request):
+    return web.Response(
+        text="<h1>⚡ OmniCore Bot is Alive & Running 24/7!</h1><p>Status: Healthy (No Sleep Mode)</p>",
+        content_type="text/html"
+    )
+
+# ৩. ইন্টারনাল হার্টবিট লুপ (বটকে অ্যাক্টিভ রাখার ভেতরের ইঞ্জিন)
+async def internal_heartbeat():
+    while True:
+        # প্রতি ১০ মিনিট পর পর ইন্টারনাল মেমোরি জাগিয়ে রাখবে
+        await asyncio.sleep(600)
+        print("[💓 Heartbeat] বট পুরোপুরি সচল আছে এবং স্লিপ মোড প্রতিরোধ করছে...")
+
+# ৪. মাস্টার স্টার্টআপ ইঞ্জিন
+async def start_services():
+    # ক. মিনি ওয়েব সার্ভার চালু করা (0.0.0.0:PORT)
+    server = web.Application()
+    server.router.add_get("/", web_health_check)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"[✓] অ্যান্টি-স্লিপ ওয়েব সার্ভার পোর্ট {PORT}-এ চালু হয়েছে!")
+
+    # খ. ব্যাকগ্রাউন্ড হার্টবিট চালু করা
+    asyncio.create_task(internal_heartbeat())
+
+    # গ. টেলিগ্রাম বট চালু করা
+    await app.start()
+    print("[✓] টেলিগ্রামের সাথে সফলভাবে কানেক্ট হয়েছে!")
+    print("[✓] ইঞ্জিন রেডি! বট এখন লাইভ।\n")
+
+    # বট যাতে বন্ধ না হয়ে চলতে থাকে
+    await idle()
+    
+    # বট থামলে সার্ভার ক্লিন করা
+    await app.stop()
+
 if __name__ == "__main__":
-    print("[✓] প্লাগইন লোডার সক্রিয় হয়েছে...")
-    print("[✓] ইঞ্জিন চালু! বট এখন টেলিগ্রামে সক্রিয়।\n")
-    app.run()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_services())
