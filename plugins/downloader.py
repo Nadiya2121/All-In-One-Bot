@@ -5,7 +5,7 @@ import asyncio
 import uuid
 import aiohttp
 import subprocess
-from pyrogram import Client, filters
+from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import yt_dlp
 
@@ -13,7 +13,6 @@ HELP = {
     "dl <লিংক>": "ইন্টারেক্টিভ প্যানেল সহ ভিডিও ডাউনলোড, রিনেম ও থাম্বনেইল সেট করে আপলোড"
 }
 
-# ব্যবহারকারীদের টাস্ক এবং স্টেট সেভ রাখার ডিকশনারি
 TASKS = {}
 USER_STATES = {}
 
@@ -41,7 +40,6 @@ def get_progress_bar(current, total):
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] {percentage:.1f}%"
 
-# ffprobe দিয়ে যেকোনো ভিডিওর নিখুঁত সময় (মিনিট/সেকেন্ড) বের করা
 def get_exact_duration(file_path):
     try:
         cmd = [
@@ -53,7 +51,6 @@ def get_exact_duration(file_path):
     except Exception:
         return 0
 
-# ডাউনলোড ইঞ্জিন
 def run_yt_dlp(url: str, download_path: str, progress_hook):
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
@@ -69,8 +66,6 @@ def run_yt_dlp(url: str, download_path: str, progress_hook):
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info), info.get('title', 'Video'), info.get('duration', 0)
 
-
-# ----------------- [ ১. ডাউনলোড শুরু ] -----------------
 
 @Client.on_message(filters.command("dl"))
 async def media_downloader(client: Client, message: Message):
@@ -115,13 +110,11 @@ async def media_downloader(client: Client, message: Message):
         loop = asyncio.get_running_loop()
         file_path, title, duration = await loop.run_in_executor(None, run_yt_dlp, url, temp_template, progress_hook)
         
-        # যদি yt-dlp সময় না পায়, তবে ffprobe দিয়ে আসল সময় বের করা
         if not duration or duration == 0:
             duration = get_exact_duration(file_path)
 
         filesize = os.path.getsize(file_path)
 
-        # টাস্ক সেভ রাখা
         TASKS[task_id] = {
             "user_id": message.from_user.id,
             "file_path": file_path,
@@ -132,7 +125,6 @@ async def media_downloader(client: Client, message: Message):
             "status_msg_id": status_msg.id
         }
 
-        # কন্ট্রোল প্যানেল বাটন
         buttons = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✏️ Rename", callback_data=f"dl_rename_{task_id}"),
@@ -146,7 +138,7 @@ async def media_downloader(client: Client, message: Message):
         caption = (
             f"✅ **ডাউনলোড সম্পন্ন হয়েছে!**\n\n"
             f"🎬 **নাম:** `{title}`\n"
-            f"⏱ **সময়কাল (Duration):** `{format_duration(duration)}`\n"
+            f"⏱ **সময়কাল:** `{format_duration(duration)}`\n"
             f"💾 **সাইজ:** `{humanbytes(filesize)}`\n"
             f"🖼 **থাম্বনেইল:** `ডিফল্ট`\n\n"
             f"👇 _নিচের বাটন চেপে নাম ও থাম্বনেইল পরিবর্তন করে **Done** চাপুন:_"
@@ -158,8 +150,6 @@ async def media_downloader(client: Client, message: Message):
         await status_msg.edit_text("❌ ডাউনলোড ব্যর্থ হয়েছে! লিংক সঠিক কিনা যাচাই করুন।")
         print(f"[DL Error]: {e}")
 
-
-# ----------------- [ ২. বাটন হ্যান্ডলার ] -----------------
 
 @Client.on_callback_query(filters.regex(r"^dl_"))
 async def button_handler(client: Client, query: CallbackQuery):
@@ -176,19 +166,16 @@ async def button_handler(client: Client, query: CallbackQuery):
         await query.answer("❌ এটি আপনার টাস্ক নয়!", show_alert=True)
         return
 
-    # ১. রিনেম অপশন
     if action == "rename":
         USER_STATES[query.from_user.id] = {"action": "waiting_rename", "task_id": task_id}
         await query.message.reply_text("✏️ **অনুগ্রহ করে নতুন ফাইলের নামটি লিখে পাঠান:**\n(যেমন: `My Video.mp4`)")
         await query.answer()
 
-    # ২. থাম্বনেইল অপশন
     elif action == "thumb":
         USER_STATES[query.from_user.id] = {"action": "waiting_thumb", "task_id": task_id}
         await query.message.reply_text("🖼 **অনুগ্রহ করে থাম্বনেইল হিসেবে একটি ছবি (Photo) পাঠান:**")
         await query.answer()
 
-    # ৩. আপলোড শুরু (Done)
     elif action == "upload":
         await query.answer("🚀 আপলোড শুরু হচ্ছে...")
         USER_STATES.pop(query.from_user.id, None)
@@ -229,7 +216,6 @@ async def button_handler(client: Client, query: CallbackQuery):
         except Exception as e:
             await query.message.edit_text(f"❌ আপলোডে সমস্যা হয়েছে: {e}")
         finally:
-            # সব ফাইল ডিলিট করে মেমোরি খালি করা
             if os.path.exists(task["file_path"]):
                 os.remove(task["file_path"])
             if task["thumb"] and os.path.exists(task["thumb"]):
@@ -237,27 +223,28 @@ async def button_handler(client: Client, query: CallbackQuery):
             TASKS.pop(task_id, None)
 
 
-# ----------------- [ ৩. ইনপুট লিসেনার (টেক্সট বা ছবি আসলে) ] -----------------
-
-@Client.on_message(filters.private & ~filters.command(["dl", "start", "help", "ai", "img"]))
+# 🔥 ম্যাজিক ফিক্স: কোনো কমান্ড যেন আর কখনো না আটকায় 🔥
+@Client.on_message(filters.private & ~filters.command([]) & (filters.text | filters.photo), group=2)
 async def input_listener(client: Client, message: Message):
+    # যদি মেসেজটি কোনো কমান্ড হয় (যেমন: /song, /mail) তবে ছেড়ে দেবে
+    if message.text and message.text.startswith("/"):
+        raise ContinuePropagation
+
     state = USER_STATES.get(message.from_user.id)
     if not state:
-        return
+        raise ContinuePropagation
 
     task_id = state["task_id"]
     task = TASKS.get(task_id)
     if not task:
         USER_STATES.pop(message.from_user.id, None)
-        return
+        raise ContinuePropagation
 
-    # ব্যবহারকারী রিনেম টেক্সট পাঠালে
     if state["action"] == "waiting_rename" and message.text:
         new_name = message.text.strip()
         if not new_name.endswith(".mp4"):
             new_name += ".mp4"
         
-        # নতুন নামে রিনেম করা
         new_path = os.path.join("downloads", f"{task_id}_{new_name}")
         os.rename(task["file_path"], new_path)
         task["file_path"] = new_path
@@ -266,7 +253,6 @@ async def input_listener(client: Client, message: Message):
         USER_STATES.pop(message.from_user.id, None)
         await message.reply_text(f"✅ ফাইলের নাম পরিবর্তন করে `{new_name}` করা হয়েছে!\nএখন আগের মেন্যুতে গিয়ে **Done** চাপুন।")
 
-    # ব্যবহারকারী ছবি পাঠালে
     elif state["action"] == "waiting_thumb" and message.photo:
         thumb_path = f"downloads/thumb_{task_id}.jpg"
         await message.download(file_name=thumb_path)
