@@ -1,5 +1,14 @@
 # main.py
 import asyncio
+
+# --- [ Python 3.11+ / 3.14 Event Loop Crash Fix ] ---
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+# ----------------------------------------------------
+
 from aiohttp import web
 from pyrogram import Client, idle
 from config import API_ID, API_HASH, BOT_TOKEN, PORT
@@ -17,19 +26,18 @@ app = Client(
     plugins=dict(root="plugins")
 )
 
-# ২. ইন্টারনাল হেলথ চেক পেজ (Koyeb-কে জাগিয়ে রাখার জন্য)
+# ২. ইন্টারনাল হেলথ চেক পেজ (Koyeb-কে স্লিপ থেকে বাঁচানোর জন্য)
 async def web_health_check(request):
     return web.Response(
-        text="<h1>⚡ OmniCore Bot is Alive & Running 24/7!</h1><p>Status: Healthy (No Sleep Mode)</p>",
+        text="<h1>⚡ OmniCore Bot is Alive & Running 24/7!</h1><p>Status: Healthy</p>",
         content_type="text/html"
     )
 
-# ৩. ইন্টারনাল হার্টবিট লুপ (বটকে অ্যাক্টিভ রাখার ভেতরের ইঞ্জিন)
+# ৩. ইন্টারনাল হার্টবিট লুপ
 async def internal_heartbeat():
     while True:
-        # প্রতি ১০ মিনিট পর পর ইন্টারনাল মেমোরি জাগিয়ে রাখবে
-        await asyncio.sleep(600)
-        print("[💓 Heartbeat] বট পুরোপুরি সচল আছে এবং স্লিপ মোড প্রতিরোধ করছে...")
+        await asyncio.sleep(600)  # প্রতি ১০ মিনিট পর পর
+        print("[💓 Heartbeat] বট পুরোপুরি সচল আছে...")
 
 # ৪. মাস্টার স্টার্টআপ ইঞ্জিন
 async def start_services():
@@ -50,12 +58,11 @@ async def start_services():
     print("[✓] টেলিগ্রামের সাথে সফলভাবে কানেক্ট হয়েছে!")
     print("[✓] ইঞ্জিন রেডি! বট এখন লাইভ।\n")
 
-    # বট যাতে বন্ধ না হয়ে চলতে থাকে
+    # বট যাতে চলতে থাকে
     await idle()
     
-    # বট থামলে সার্ভার ক্লিন করা
+    # বট বন্ধ হলে
     await app.stop()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
     loop.run_until_complete(start_services())
