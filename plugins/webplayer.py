@@ -1,11 +1,13 @@
 # plugins/webplayer.py
 import os
 import re
+import html
 import json
 import time
 import asyncio
 import aiohttp
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.types import Message
 
 HELP = {
@@ -40,16 +42,12 @@ def get_api_credentials():
     return None, None
 
 
-# ----------------- [ ১. চ্যাট থেকেই অ্যাকাউন্ট সেট করা ] -----------------
-
 @Client.on_message(filters.command("set_player") & filters.private)
 async def set_player_creds(client: Client, message: Message):
     if len(message.command) < 3:
         await message.reply_text(
             "⚙️ **প্লেয়ার অ্যাকাউন্ট সেট করার নিয়ম:**\n\n"
-            "`/set_player API_LOGIN API_KEY`\n\n"
-            "যেমন:\n"
-            "`/set_player 534f5100961cd89227dc xYz1234567`"
+            "`/set_player API_LOGIN API_KEY`"
         )
         return
 
@@ -71,17 +69,11 @@ async def check_player_creds(client: Client, message: Message):
         await message.reply_text("❌ কোনো প্লেয়ার যুক্ত নেই! যুক্ত করতে লিখুন:\n`/set_player API_LOGIN API_KEY`")
 
 
-# ----------------- [ ২. ভিডিও আপলোড ও Embed প্লেয়ার তৈরি ] -----------------
-
 @Client.on_message(filters.command(["player", "embed"]))
 async def create_web_player(client: Client, message: Message):
     api_login, api_key = get_api_credentials()
     if not api_login or not api_key:
-        await message.reply_text(
-            "🔒 **আপনার প্লেয়ার অ্যাকাউন্ট সেট করা নেই!**\n\n"
-            "প্রথমে [streamtape.com](https://streamtape.com) এ ফ্রি সাইন-আপ করে এখানে লিখুন:\n"
-            "`/set_player API_LOGIN API_KEY`"
-        )
+        await message.reply_text("🔒 আগে প্লেয়ার অ্যাকাউন্ট যুক্ত করুন:\n`/set_player API_LOGIN API_KEY`")
         return
 
     target_msg = message.reply_to_message
@@ -93,28 +85,25 @@ async def create_web_player(client: Client, message: Message):
     file_name = getattr(media, "file_name", "video.mp4") or "video.mp4"
     file_size = media.file_size
 
-    status_msg = await message.reply_text("📥 **টেলিগ্রাম থেকে ভিডিও সংগ্রহ করা হচ্ছে...**")
+    status_msg = await message.reply_text("📥 <b>টেলিগ্রাম থেকে ভিডিও সংগ্রহ করা হচ্ছে...</b>", parse_mode=ParseMode.HTML)
 
     last_edit = 0
     async def down_progress(current, total):
         nonlocal last_edit
         now = time.time()
         if now - last_edit > 3:
-            text = f"📥 **ডাউনলোড হচ্ছে:**\n\n{get_progress_bar(current, total)}\n💾 {humanbytes(current)} / {humanbytes(total)}"
+            text = f"📥 <b>ডাউনলোড হচ্ছে:</b>\n\n{get_progress_bar(current, total)}\n💾 {humanbytes(current)} / {humanbytes(total)}"
             try:
-                await status_msg.edit_text(text)
+                await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
             except Exception:
                 pass
             last_edit = now
 
     file_path = None
     try:
-        # ১. ফাইলটি ডাউনলোড করা
         file_path = await target_msg.download(progress=down_progress)
+        await status_msg.edit_text("☁️ <b>ভিডিও ক্লাউডে আপলোড হচ্ছে...</b>", parse_mode=ParseMode.HTML)
 
-        await status_msg.edit_text("☁️ **ভিডিও ক্লাউডে আপলোড হচ্ছে (কোনো সার্ভার ব্যান্ডউইথ খরচ হবে না)...**")
-
-        # ২. আপলোড লিংক পাওয়া
         upload_server_url = None
         timeout = aiohttp.ClientTimeout(total=1800)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -125,10 +114,9 @@ async def create_web_player(client: Client, message: Message):
                     upload_server_url = data["result"]["url"]
 
         if not upload_server_url:
-            await status_msg.edit_text("❌ ক্লাউড সার্ভার আপলোড লিংক দেয়নি। Login/Key সঠিক কিনা চেক করুন।")
+            await status_msg.edit_text("❌ ক্লাউড সার্ভার রেসপন্স করেনি।")
             return
 
-        # ৩. ক্লাউডে সরাসরি ফাইল আপলোড
         file_id = None
         raw_response = ""
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -138,7 +126,6 @@ async def create_web_player(client: Client, message: Message):
                 async with session.post(upload_server_url, data=form_data) as resp:
                     raw_response = await resp.text()
 
-        # 🔥 ডাবল মেকানিজম দিয়ে ফাইল আইডি বের করা 🔥
         try:
             res_data = json.loads(raw_response)
             if str(res_data.get("status")) == "200":
@@ -146,33 +133,33 @@ async def create_web_player(client: Client, message: Message):
         except Exception:
             pass
 
-        # যদি JSON ফেল করে তবে সরাসরি টেক্সট স্ক্যান করে আইডি বের করা
         if not file_id:
             id_match = re.search(r'"id"\s*:\s*"([^"]+)"', raw_response)
             if id_match:
                 file_id = id_match.group(1)
 
-        # যদি কোনো কারণে ফাইল আইডি না পায় তবে সার্ভারের মেসেজ দেখাবে
         if not file_id:
-            await status_msg.edit_text(f"❌ সার্ভার রেসপন্স করেছে কিন্তু আইডি পাওয়া যায়নি:\n`{raw_response[:300]}`")
+            await status_msg.edit_text(f"❌ আইডি পাওয়া যায়নি:\n<code>{raw_response[:200]}</code>", parse_mode=ParseMode.HTML)
             return
 
-        # ৪. ওয়েবসাইট প্লেয়ার ও এমবেড লিংক জেনারেশন
         stream_link = f"https://streamtape.com/v/{file_id}"
-        embed_code = f"`<iframe src=\"https://streamtape.com/e/{file_id}\" width=\"100%\" height=\"480\" frameborder=\"0\" allowfullscreen=\"true\"></iframe>`"
+        
+        # 🔥 ম্যাজিক ফিক্স: যাতে টেলিগ্রাম কোডটি লুকিয়ে ফেলতে না পারে 🔥
+        raw_iframe = f'<iframe src="https://streamtape.com/e/{file_id}" width="100%" height="480" frameborder="0" allowfullscreen="true"></iframe>'
+        safe_embed_code = f"<code>{html.escape(raw_iframe)}</code>"
 
         success_text = (
-            f"🎬 **ভিডিও প্লেয়ার ও Embed কোড প্রস্তুত!**\n\n"
-            f"📁 **ফাইলের নাম:** `{file_name}`\n"
-            f"💾 **সাইজ:** `{humanbytes(file_size)}`\n"
+            f"🎬 <b>ভিডিও প্লেয়ার ও Embed কোড প্রস্তুত!</b>\n\n"
+            f"📁 <b>ফাইলের নাম:</b> <code>{file_name}</code>\n"
+            f"💾 <b>সাইজ:</b> <code>{humanbytes(file_size)}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🌐 **ওয়েবসাইটে সরাসরি প্লে করার কোড (Embed Code):**\n"
-            f"{embed_code}\n\n"
-            f"*(উপরের কোডটি কপি করে আপনার ওয়েবসাইটে পেস্ট করলেই ফুল-স্ক্রিন ভিডিও প্লেয়ার চালু হবে)*\n\n"
-            f"▶️ **অনলাইন প্লে লিংক:**\n{stream_link}\n\n"
-            f"🤖 Powered by **OmniCore Stream**"
+            f"🌐 <b>ওয়েবসাইটে সরাসরি প্লে করার কোড (Embed Code):</b>\n"
+            f"{safe_embed_code}\n\n"
+            f"<i>(উপরের কোডটিতে ট্যাপ করলেই কপি হবে, এটি ওয়েবসাইটে পেস্ট করলেই প্লেয়ার চলবে)</i>\n\n"
+            f"▶️ <b>অনলাইন প্লে লিংক:</b>\n{stream_link}\n\n"
+            f"🤖 Powered by <b>OmniCore Stream</b>"
         )
-        await status_msg.edit_text(success_text, disable_web_page_preview=True)
+        await status_msg.edit_text(success_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ এরর হয়েছে: {e}")
