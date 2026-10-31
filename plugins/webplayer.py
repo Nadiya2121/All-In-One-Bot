@@ -1,5 +1,6 @@
 # plugins/webplayer.py
 import os
+import json
 import time
 import asyncio
 import aiohttp
@@ -47,8 +48,7 @@ async def set_player_creds(client: Client, message: Message):
             "⚙️ **প্লেয়ার অ্যাকাউন্ট সেট করার নিয়ম:**\n\n"
             "`/set_player API_LOGIN API_KEY`\n\n"
             "যেমন:\n"
-            "`/set_player a1b2c3d4 xYz1234567`\n\n"
-            "*(streamtape.com এর Account পেজ থেকে এই দুটি কপি করে এখানে দিন)*"
+            "`/set_player 534f5100961cd89227dc xYz1234567`"
         )
         return
 
@@ -115,7 +115,8 @@ async def create_web_player(client: Client, message: Message):
 
         # ২. আপলোড লিংক পাওয়া
         upload_server_url = None
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=1800) # বড় ভিডিওর জন্য ৩০ মিনিট টাইমআউট
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             url_req = f"https://api.streamtape.com/file/ul?login={api_login}&key={api_key}"
             async with session.get(url_req) as resp:
                 data = await resp.json()
@@ -126,19 +127,23 @@ async def create_web_player(client: Client, message: Message):
             await status_msg.edit_text("❌ ক্লাউড সার্ভার রেসপন্স করছে না। আপনার Login/Key সঠিক কিনা চেক করুন।")
             return
 
-        # ৩. ক্লাউডে সরাসরি ফাইল আপলোড
+        # ৩. ক্লাউডে সরাসরি ফাইল আপলোড (🔥 ফিক্সড রেসপন্স হ্যান্ডলার 🔥)
         file_id = None
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             with open(file_path, "rb") as f:
                 form_data = aiohttp.FormData()
                 form_data.add_field("file1", f, filename=file_name)
                 async with session.post(upload_server_url, data=form_data) as resp:
-                    res_data = await resp.json()
-                    if res_data.get("status") == 200:
-                        file_id = res_data["result"]["id"]
+                    raw_response = await resp.text()
+                    try:
+                        res_data = json.loads(raw_response)
+                        if res_data.get("status") == 200:
+                            file_id = res_data["result"]["id"]
+                    except Exception:
+                        pass
 
         if not file_id:
-            await status_msg.edit_text("❌ ভিডিও আপলোড ব্যর্থ হয়েছে!")
+            await status_msg.edit_text("❌ ভিডিও আপলোড সম্পন্ন হলেও ফাইল আইডি পাওয়া যায়নি!")
             return
 
         # ৪. ওয়েবসাইট প্লেয়ার ও এমবেড লিংক জেনারেশন
