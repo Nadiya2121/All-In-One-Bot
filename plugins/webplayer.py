@@ -45,20 +45,45 @@ def get_api_credentials():
                 return data[0].strip(), data[1].strip()
     return None, None
 
-# ছবিকে স্থায়ী ক্লাউড স্টোরেজে আপলোড করা (যা আজীবন লাইভ থাকবে)
+# 🔥 ডাবল ইঞ্জিন স্থায়ী ইমেজ আপলোডার (Cloudflare বাইপাস সহ) 🔥
 async def upload_poster_permanently(image_path: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    # ১. প্রথম চেষ্টা: FreeImage CDN (অত্যন্ত দ্রুত ও নির্ভরযোগ্য)
+    try:
+        url = "https://freeimage.host/api/1/upload"
+        params = {"key": "6d207e02198a847e52c0a97b014f6e04", "format": "json"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            with open(image_path, "rb") as f:
+                data = aiohttp.FormData()
+                data.add_field("source", f)
+                async with session.post(url, params=params, data=data, timeout=15) as resp:
+                    if resp.status == 200:
+                        json_data = await resp.json()
+                        img_url = json_data.get("image", {}).get("url")
+                        if img_url:
+                            return img_url
+    except Exception as e:
+        print(f"[FreeImage Upload Error]: {e}")
+
+    # ২. দ্বিতীয় চেষ্টা (ব্যাকআপ): Catbox
     try:
         url = "https://catbox.moe/user/api.php"
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             with open(image_path, "rb") as f:
                 data = aiohttp.FormData()
                 data.add_field("reqtype", "fileupload")
                 data.add_field("fileToUpload", f)
-                async with session.post(url, data=data) as resp:
+                async with session.post(url, data=data, timeout=15) as resp:
                     if resp.status == 200:
-                        return (await resp.text()).strip()
+                        text_res = (await resp.text()).strip()
+                        if text_res.startswith("http"):
+                            return text_res
     except Exception as e:
-        print(f"[Poster Upload Error]: {e}")
+        print(f"[Catbox Upload Error]: {e}")
+
     return None
 
 
@@ -218,8 +243,7 @@ async def start_blogger_flow(client: Client, query: CallbackQuery):
     BLOGGER_STATES[query.from_user.id] = {"task_id": task_id, "step": "waiting_title"}
     await query.message.reply_text(
         "📝 **ধাপ ১/২: পোস্টের টাইটেল দিন**\n\n"
-        "ব্লগ পোস্টের জন্য সুন্দর একটি টাইটেল (মুভির নাম) লিখে পাঠান:\n"
-        "*(যেমন: KGF Chapter 2 Full Movie Bangla Dubbed)*"
+        "ব্লগ পোস্টের জন্য সুন্দর একটি টাইটেল (মুভির নাম) লিখে পাঠান:"
     )
     await query.answer()
 
@@ -247,24 +271,27 @@ async def blogger_input_listener(client: Client, message: Message):
         await message.reply_text(
             f"✅ টাইটেল সেভ হয়েছে: **{task['title']}**\n\n"
             "🖼 **ধাপ ২/২: পোস্টার বা থাম্বনেইল পাঠান**\n"
-            "এবার পোস্টের জন্য একটি পোস্টার বা কভার ছবি (Photo) পাঠান (যেকোনো সাইজের হতে পারে):"
+            "এবার পোস্টের জন্য একটি পোস্টার বা কভার ছবি (Photo) পাঠান:"
         )
 
     # ২. পোস্টার গ্রহণ ও সম্পূর্ণ মোবাইল-ফ্রেন্ডলি HTML পোস্ট তৈরি
     elif state["step"] == "waiting_poster" and message.photo:
-        status_msg = await message.reply_text("⚡ **পোস্টার পার্মানেন্ট ক্লাউডে সেভ হচ্ছে এবং সম্পূর্ণ ব্লগার কোড তৈরি হচ্ছে...**")
+        status_msg = await message.reply_text("⚡ **পোস্টার ক্লাউড সিডিএন-এ সেভ হচ্ছে এবং সম্পূর্ণ কোড তৈরি হচ্ছে...**")
 
         temp_img = f"downloads/poster_{user_id}.jpg"
         await message.download(file_name=temp_img)
 
-        # ছবিটি স্থায়ীভাবে ক্লাউডে আপলোড করা
+        # ছবিটি স্থায়ীভাবে ক্লাউড সিডিএন-এ আপলোড
         poster_url = await upload_poster_permanently(temp_img)
         if os.path.exists(temp_img):
             os.remove(temp_img)
 
         poster_img_tag = f'<img src="{poster_url}" style="max-width: 100%; height: auto; max-height: 420px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" alt="{task["title"]}" />' if poster_url else ""
 
-        # 🔥 আধুনিক, মোবাইল-ফ্রেন্ডলি ও রেসপন্সিভ ব্লগার টেমপ্লেট 🔥
+        # যদি ছবি আপলোড ব্যর্থ হয় তবে মেসেজ দিয়ে সতর্ক করবে
+        if not poster_url:
+            await message.reply_text("⚠️ সতর্কতা: ছবিটি ক্লাউডে আপলোড হতে পারেনি, তাই ইমেজ ছাড়া পোস্ট তৈরি হয়েছে।")
+
         blogger_html = f"""<div style="max-width: 750px; margin: auto; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
   <h2 style="background: #1e293b; color: #ffffff; padding: 18px 20px; margin: 0; text-align: center; font-size: 20px;">{task["title"]}</h2>
   
