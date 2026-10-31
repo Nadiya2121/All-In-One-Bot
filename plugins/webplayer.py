@@ -7,23 +7,17 @@ import time
 import uuid
 import asyncio
 import aiohttp
-from aiohttp import web
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.enums import ParseMode
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from motor.motor_asyncio import AsyncIOMotorClient
-from config import APP_URL, MONGO_URL
-from main import web_app
+from config import APP_URL
+from main import db
 
 HELP = {
-    "player": "MongoDB চালিত পার্মানেন্ট পোস্টার সহ ব্লগার পোস্ট তৈরি করতে",
+    "player": "ভিডিওর ওপর রিপ্লাই দিয়ে MongoDB চালিত পোস্টার সহ ব্লগার কোড পেতে",
     "set_player <Login> <Key>": "Streamtape অ্যাকাউন্ট ডাটাবেজে স্থায়ীভাবে সেভ করতে",
     "my_player": "ডাটাবেজ থেকে প্লেয়ার অ্যাকাউন্ট চেক করতে"
 }
-
-# 🔥 MongoDB ডাটাবেজ কানেকশন 🔥
-mongo_client = AsyncIOMotorClient(MONGO_URL) if MONGO_URL and "আপনার_MONGO" not in MONGO_URL else None
-db = mongo_client["OmniCoreDB"] if mongo_client else None
 
 BLOGGER_TASKS = {}
 BLOGGER_STATES = {}
@@ -45,32 +39,13 @@ def get_progress_bar(current, total):
 
 async def get_api_credentials():
     if db is not None:
-        doc = await db.settings.find_one({"_id": "streamtape"})
-        if doc:
-            return doc.get("login"), doc.get("key")
+        try:
+            doc = await db.settings.find_one({"_id": "streamtape"})
+            if doc:
+                return doc.get("login"), doc.get("key")
+        except Exception:
+            pass
     return None, None
-
-
-# 🔥 Koyeb সার্ভার দিয়ে সরাসরি MongoDB থেকে ছবি রেন্ডার করার ইঞ্জিন 🔥
-async def serve_mongo_poster(request):
-    filename = request.match_info.get("filename")
-    poster_id = filename.replace(".jpg", "")
-
-    if db is not None:
-        doc = await db.posters.find_one({"_id": poster_id})
-        if doc and "data" in doc:
-            # ব্রাউজারে ১ বছর ক্যাশ থাকবে, যাতে বারবার সার্ভারে লোড না পড়ে
-            return web.Response(
-                body=doc["data"],
-                content_type="image/jpeg",
-                headers={"Cache-Control": "public, max-age=31536000"}
-            )
-    return web.Response(status=404, text="Poster Not Found In Database")
-
-try:
-    web_app.router.add_get("/posters/{filename}", serve_mongo_poster)
-except Exception:
-    pass
 
 
 # ----------------- [ ১. প্লেয়ার অ্যাকাউন্ট ডাটাবেজে সেভ ] -----------------
@@ -82,20 +57,19 @@ async def set_player_creds(client: Client, message: Message):
         return
 
     if db is None:
-        await message.reply_text("❌ MongoDB কানেক্ট করা নেই! আগে `config.py`-তে MONGO_URL দিন।")
+        await message.reply_text("❌ MongoDB কানেক্ট করা নেই! `config.py` চেক করুন।")
         return
 
     login = message.command[1].strip()
     key = message.command[2].strip()
 
-    # ডাটাবেজে স্থায়ীভাবে সেভ রাখা
     await db.settings.update_one(
         {"_id": "streamtape"},
         {"$set": {"login": login, "key": key}},
         upsert=True
     )
 
-    await message.reply_text("🎉 **অভিনন্দন! আপনার প্লেয়ার অ্যাকাউন্ট MongoDB ডাটাবেজে পার্মানেন্টলি সেভ হয়েছে!**\nKoyeb সার্ভার রিসেট হলেও এটি আর কখনোই মুছবে না।")
+    await message.reply_text("🎉 **অভিনন্দন! আপনার প্লেয়ার অ্যাকাউন্ট MongoDB ডাটাবেজে পার্মানেন্টলি সেভ হয়েছে!**\nKoyeb সার্ভার রিস্টার্ট হলেও এটি আর কখনোই মুছবে না।")
 
 @Client.on_message(filters.command("my_player") & filters.private)
 async def check_player_creds(client: Client, message: Message):
@@ -271,13 +245,16 @@ async def blogger_input_listener(client: Client, message: Message):
     elif state["step"] == "waiting_poster" and message.photo:
         status_msg = await message.reply_text("⚡ **পোস্টার MongoDB ডাটাবেজে স্থায়ীভাবে সেভ হচ্ছে...**")
 
-        poster_id = str(uuid.uuid4())[:10]
-        temp_img = f"downloads/temp_{poster_id}.jpg"
-        await message.download(file_name=temp_img)
+        poster_id = str(uuid.uuid4())[:8]
+        poster_filename = f"{poster_id}.jpg"
+        
+        os.makedirs("downloads/posters", exist_ok=True)
+        local_path = os.path.join("downloads/posters", poster_filename)
+        await message.download(file_name=local_path)
 
-        # ছবিটিকে ডাটাবেজে সেভ করা
+        # MongoDB ডাটাবেজে ছবি সেভ করা
         if db is not None:
-            with open(temp_img, "rb") as f:
+            with open(local_path, "rb") as f:
                 img_bytes = f.read()
             await db.posters.update_one(
                 {"_id": poster_id},
@@ -285,15 +262,12 @@ async def blogger_input_listener(client: Client, message: Message):
                 upsert=True
             )
 
-        if os.path.exists(temp_img):
-            os.remove(temp_img)
-
-        # আপনার Koyeb ডোমেইনের পার্মানেন্ট লিঙ্ক তৈরি
+        # আপনার Koyeb ডোমেইনের পার্মানেন্ট লিংক তৈরি
         base_url = APP_URL.strip().rstrip("/")
         if not base_url.startswith("http"):
             base_url = f"https://{base_url}"
 
-        poster_url = f"{base_url}/posters/{poster_id}.jpg"
+        poster_url = f"{base_url}/posters/{poster_filename}"
         poster_img_tag = f'<img src="{poster_url}" style="max-width: 100%; height: auto; max-height: 420px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" alt="{task["title"]}" />'
 
         blogger_html = f"""<div style="max-width: 750px; margin: auto; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
