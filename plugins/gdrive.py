@@ -1,5 +1,6 @@
 # plugins/gdrive.py
 import os
+import re
 import time
 import asyncio
 from pyrogram import Client, filters
@@ -14,9 +15,9 @@ HELP = {
     "gdrive_login": "আপনার গুগল ড্রাইভ জিমেইল কানেক্ট করতে"
 }
 
-# ⚠️ গুগল ক্লাউড থেকে পাওয়া আসল Client ID এবং Secret নিচে বসিয়ে দিন ⚠️
-GDRIVE_CLIENT_ID = "আপনার_CLIENT_ID_এখানে_দিন.apps.googleusercontent.com"
-GDRIVE_CLIENT_SECRET = "আপনার_CLIENT_SECRET_এখানে_দিন"
+# ⚠️ আপনার গুগল ক্লাউডের আসল ইংরেজি Client ID এবং Secret এখানে বসান (কোনো বাংলা অক্ষর রাখা যাবে না) ⚠️
+GDRIVE_CLIENT_ID = "YOUR_CLIENT_ID_HERE.apps.googleusercontent.com"
+GDRIVE_CLIENT_SECRET = "YOUR_CLIENT_SECRET_HERE"
 
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 TOKEN_FILE = "downloads/gdrive_token.json"
@@ -48,14 +49,22 @@ def get_gdrive_service():
 
 @Client.on_message(filters.command("gdrive_login") & filters.private)
 async def gdrive_login_start(client: Client, message: Message):
+    # বাংলা বা ডামি লেখা চেক করা
+    if "YOUR_CLIENT" in GDRIVE_CLIENT_ID or not GDRIVE_CLIENT_ID.isascii():
+        await message.reply_text(
+            "❌ **Client ID সেট করা হয়নি!**\n\n"
+            "অনুগ্রহ করে `plugins/gdrive.py` ফাইলের ১০ ও ১১ নম্বর লাইনে আপনার গুগল ক্লাউড থেকে পাওয়া আসল ইংরেজি `Client ID` এবং `Client Secret` বসিয়ে সেভ করুন।"
+        )
+        return
+
     if os.path.exists(TOKEN_FILE):
         await message.reply_text("✅ আপনার গুগল ড্রাইভ অলরেডি কানেক্টেড আছে!\nযেকোনো ফাইলে রিপ্লাই দিয়ে `/gdrive` লিখলেই ওয়েবসাইটে প্লে করার লিংক পেয়ে যাবেন।")
         return
 
     client_config = {
         "installed": {
-            "client_id": GDRIVE_CLIENT_ID,
-            "client_secret": GDRIVE_CLIENT_SECRET,
+            "client_id": GDRIVE_CLIENT_ID.strip(),
+            "client_secret": GDRIVE_CLIENT_SECRET.strip(),
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token"
         }
@@ -70,7 +79,7 @@ async def gdrive_login_start(client: Client, message: Message):
         "🔗 **গুগল ড্রাইভ কানেক্ট করার অফিশিয়াল লিংক:**\n\n"
         f"১. [এখানে ক্লিক করে গুগলে প্রবেশ করুন]({auth_url})\n\n"
         "২. আপনার জিমেইল সিলেক্ট করে **'Continue' / 'Allow'** চাপুন।\n"
-        "৩. স্ক্রিনে আসা **Code**-টি কপি করে এখানে চ্যাটে পাঠিয়ে দিন!"
+        "৩. স্ক্রিনে যে **Code** দেখতে পাবেন, শুধুমাত্র সেই কোডটি কপি করে এখানে চ্যাটে পাঠিয়ে দিন (কোনো বাড়তি কথা ছাড়া)!"
     )
 
 
@@ -82,7 +91,15 @@ async def gdrive_code_listener(client: Client, message: Message):
     if user_id not in GDRIVE_STATES:
         return
 
-    code = message.text.strip()
+    raw_text = message.text.strip()
+    
+    # কোড থেকে শুধু ইংরেজি অক্ষর ফিল্টার করা (যাতে কোনো বাংলা না থাকে)
+    code = ''.join([c for c in raw_text if c.isascii() and not c.isspace()])
+
+    if not code:
+        await message.reply_text("❌ কোডটিতে কোনো সঠিক ইংরেজি ক্যারেক্টার পাওয়া যায়নি! শুধু কোডটি কপি করে পাঠান।")
+        return
+
     flow = GDRIVE_STATES[user_id]
     status_msg = await message.reply_text("⚡ **গুগল ড্রাইভ ভেরিফাই করা হচ্ছে...**")
 
@@ -95,7 +112,7 @@ async def gdrive_code_listener(client: Client, message: Message):
             f.write(creds.to_json())
 
         GDRIVE_STATES.pop(user_id, None)
-        await status_msg.edit_text("🎉 **অভিনন্দন! গুগল ড্রাইভ সফলভাবে কানেক্ট হয়েছে।**\nএখন যেকোনো ফাইলে রিপ্লাই দিয়ে `/gdrive` লিখলেই ওয়েবসাইটে সরাসরি প্লে করার মতো লিংক পেয়ে যাবেন!")
+        await status_msg.edit_text("🎉 **অভিনন্দন! গুগল ড্রাইভ সফলভাবে কানেক্ট হয়েছে।**\nএখন যেকোনো ভিডিও বা ফাইলে রিপ্লাই দিয়ে `/gdrive` লিখলেই ওয়েবসাইটে প্লে করার লিংক পেয়ে যাবেন!")
 
     except Exception as e:
         GDRIVE_STATES.pop(user_id, None)
@@ -151,13 +168,11 @@ async def upload_to_gdrive(client: Client, message: Message):
 
         file_id = drive_file.get('id')
 
-        # ফাইল পাবলিক করা যাতে সবাই ওয়েবসাইটে সরাসরি দেখতে পারে
         service.permissions().create(
             fileId=file_id,
             body={'type': 'anyone', 'role': 'reader'}
         ).execute()
 
-        # 🔥 স্পেশাল ওয়েবসাইট স্ট্রিমিং ও এমবেড লিংক 🔥
         stream_link = f"https://drive.google.com/file/d/{file_id}/preview"
         direct_download = f"https://drive.google.com/uc?export=download&id={file_id}"
         embed_code = f"`<iframe src=\"{stream_link}\" width=\"100%\" height=\"480\" frameborder=\"0\" allowfullscreen=\"true\"></iframe>`"
@@ -170,7 +185,7 @@ async def upload_to_gdrive(client: Client, message: Message):
             f"▶️ **সরাসরি প্লে / স্ট্রিম লিংক:**\n{stream_link}\n\n"
             f"🌐 **ওয়েবসাইটে প্লে করার কোড (Embed Iframe):**\n{embed_code}\n\n"
             f"⬇️ **ডিরেক্ট ডাউনলোড লিংক:**\n{direct_download}\n\n"
-            f"🤖 Powered by **OmniCore Bridge**"
+            f"🤖 Powered by **@TGLinkBase Bridge**"
         )
         await status_msg.edit_text(success_text, disable_web_page_preview=True)
 
