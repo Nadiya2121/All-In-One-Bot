@@ -24,3 +24,6 @@ PORT = int(os.environ.get("PORT", 8080))
 
 # 🔥 ৬. অ্যান্টি-স্লিপ পাবলিক লিংক (যাতে বট ২৪ ঘণ্টা না ঘুমিয়ে সচল থাকে) 🔥
 APP_URL = os.environ.get("APP_URL", "https://minimal-karoly-chatgept-9ec16274.apps.mistral.run")
+
+# config.py এর নিচে যোগ করুন:
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://MovieLinkbd:MovieLinkbd@cluster0.cmx4zn5.mongodb.net/?appName=Cluster0")
