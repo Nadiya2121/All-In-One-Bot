@@ -1,27 +1,31 @@
 # plugins/gdrive.py
 import os
-import re
 import time
 import asyncio
+from aiohttp import web
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
+from main import web_app
 
 HELP = {
-    "gdrive": "টেলিগ্রামের ফাইলে রিপ্লাই দিয়ে সরাসরি ওয়েবসাইটে প্লে করার মতো গুগল ড্রাইভ লিংক পেতে",
-    "gdrive_login": "আপনার গুগল ড্রাইভ জিমেইল কানেক্ট করতে"
+    "gdrive": "টেলিগ্রামের ফাইলে রিপ্লাই দিয়ে ওয়েবসাইটে প্লে করার গুগল ড্রাইভ লিংক পেতে",
+    "gdrive_login": "১-ক্লিকে জিমেইল দিয়ে গুগল ড্রাইভ কানেক্ট করতে"
 }
 
-# ⚠️ আপনার গুগল ক্লাউডের আসল ইংরেজি Client ID এবং Secret এখানে বসান (কোনো বাংলা অক্ষর রাখা যাবে না) ⚠️
-GDRIVE_CLIENT_ID = "YOUR_CLIENT_ID_HERE.apps.googleusercontent.com"
-GDRIVE_CLIENT_SECRET = "YOUR_CLIENT_SECRET_HERE"
+# ⚠️ আপনার গুগল ক্লাউডের ইংরেজি Client ID এবং Secret নিচে দিন ⚠️
+GDRIVE_CLIENT_ID = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+GDRIVE_CLIENT_SECRET = "YOUR_CLIENT_SECRET"
 
+# আপনার Koyeb পাবলিক লিংক
+REDIRECT_URI = "https://minimal-karoly-chatgept-9ec16274.apps.mistral.run/gdrive/callback"
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 TOKEN_FILE = "downloads/gdrive_token.json"
-GDRIVE_STATES = {}
+
+AUTH_FLOWS = {}
 
 def humanbytes(size):
     if not size:
@@ -45,63 +49,19 @@ def get_gdrive_service():
     return None
 
 
-# ----------------- [ ১. ইন-বট জিমেইল কানেক্ট ] -----------------
+# ----------------- [ ১. ওয়েব ব্রাউজার অটো-কানেক্টর ] -----------------
 
-@Client.on_message(filters.command("gdrive_login") & filters.private)
-async def gdrive_login_start(client: Client, message: Message):
-    # বাংলা বা ডামি লেখা চেক করা
-    if "YOUR_CLIENT" in GDRIVE_CLIENT_ID or not GDRIVE_CLIENT_ID.isascii():
-        await message.reply_text(
-            "❌ **Client ID সেট করা হয়নি!**\n\n"
-            "অনুগ্রহ করে `plugins/gdrive.py` ফাইলের ১০ ও ১১ নম্বর লাইনে আপনার গুগল ক্লাউড থেকে পাওয়া আসল ইংরেজি `Client ID` এবং `Client Secret` বসিয়ে সেভ করুন।"
-        )
-        return
+async def gdrive_web_callback(request):
+    code = request.query.get('code')
+    state = request.query.get('state')
 
-    if os.path.exists(TOKEN_FILE):
-        await message.reply_text("✅ আপনার গুগল ড্রাইভ অলরেডি কানেক্টেড আছে!\nযেকোনো ফাইলে রিপ্লাই দিয়ে `/gdrive` লিখলেই ওয়েবসাইটে প্লে করার লিংক পেয়ে যাবেন।")
-        return
+    if not code or not state or state not in AUTH_FLOWS:
+        return web.Response(text="<h1>❌ অথোরাইজেশন ব্যর্থ হয়েছে বা টাইমআউট হয়েছে!</h1>", content_type="text/html")
 
-    client_config = {
-        "installed": {
-            "client_id": GDRIVE_CLIENT_ID.strip(),
-            "client_secret": GDRIVE_CLIENT_SECRET.strip(),
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token"
-        }
-    }
-    
-    flow = InstalledAppFlow.from_client_config(client_config, SCOPES, redirect_uri="urn:ietf:wg:oauth:2.0:oob")
-    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-
-    GDRIVE_STATES[message.from_user.id] = flow
-
-    await message.reply_text(
-        "🔗 **গুগল ড্রাইভ কানেক্ট করার অফিশিয়াল লিংক:**\n\n"
-        f"১. [এখানে ক্লিক করে গুগলে প্রবেশ করুন]({auth_url})\n\n"
-        "২. আপনার জিমেইল সিলেক্ট করে **'Continue' / 'Allow'** চাপুন।\n"
-        "৩. স্ক্রিনে যে **Code** দেখতে পাবেন, শুধুমাত্র সেই কোডটি কপি করে এখানে চ্যাটে পাঠিয়ে দিন (কোনো বাড়তি কথা ছাড়া)!"
-    )
-
-
-# ----------------- [ ২. কোড ইনপুট রিসিভার ] -----------------
-
-@Client.on_message(filters.private & ~filters.command([]) & filters.text, group=4)
-async def gdrive_code_listener(client: Client, message: Message):
-    user_id = message.from_user.id
-    if user_id not in GDRIVE_STATES:
-        return
-
-    raw_text = message.text.strip()
-    
-    # কোড থেকে শুধু ইংরেজি অক্ষর ফিল্টার করা (যাতে কোনো বাংলা না থাকে)
-    code = ''.join([c for c in raw_text if c.isascii() and not c.isspace()])
-
-    if not code:
-        await message.reply_text("❌ কোডটিতে কোনো সঠিক ইংরেজি ক্যারেক্টার পাওয়া যায়নি! শুধু কোডটি কপি করে পাঠান।")
-        return
-
-    flow = GDRIVE_STATES[user_id]
-    status_msg = await message.reply_text("⚡ **গুগল ড্রাইভ ভেরিফাই করা হচ্ছে...**")
+    flow_data = AUTH_FLOWS.pop(state)
+    flow: Flow = flow_data["flow"]
+    client: Client = flow_data["client"]
+    user_id = flow_data["user_id"]
 
     try:
         flow.fetch_token(code=code)
@@ -111,15 +71,80 @@ async def gdrive_code_listener(client: Client, message: Message):
         with open(TOKEN_FILE, 'w') as f:
             f.write(creds.to_json())
 
-        GDRIVE_STATES.pop(user_id, None)
-        await status_msg.edit_text("🎉 **অভিনন্দন! গুগল ড্রাইভ সফলভাবে কানেক্ট হয়েছে।**\nএখন যেকোনো ভিডিও বা ফাইলে রিপ্লাই দিয়ে `/gdrive` লিখলেই ওয়েবসাইটে প্লে করার লিংক পেয়ে যাবেন!")
+        # টেলিগ্রামে ইউজারকে কনফার্মেশন পাঠানো
+        await client.send_message(
+            chat_id=user_id,
+            text="🎉 **অভিনন্দন! আপনার গুগল ড্রাইভ ১-ক্লিকে সফলভাবে কানেক্ট হয়েছে!**\nএখন যেকোনো ভিডিওতে রিপ্লাই দিয়ে `/gdrive` লিখলেই ওয়েবসাইটে প্লে করার লিংক পেয়ে যাবেন।"
+        )
+
+        success_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Connected!</title>
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 40px; background: #0f172a; color: white; }
+                .card { background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); max-width: 400px; margin: auto; }
+                h1 { color: #10b981; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h1>✅ সফলভাবে কানেক্ট হয়েছে!</h1>
+                <p>আপনার গুগল ড্রাইভ বটের সাথে যুক্ত হয়ে গেছে।</p>
+                <p>আপনি এখন এই ব্রাউজার পেজটি কেটে দিয়ে টেলিগ্রামে ফিরে যেতে পারেন।</p>
+            </div>
+        </body>
+        </html>
+        """
+        return web.Response(text=success_html, content_type="text/html")
 
     except Exception as e:
-        GDRIVE_STATES.pop(user_id, None)
-        await status_msg.edit_text(f"❌ কোডটি ভুল হয়েছে বা সমস্যা হয়েছে: {e}")
+        return web.Response(text=f"<h1>❌ এরর: {e}</h1>", content_type="text/html")
+
+# স্বয়ংক্রিয়ভাবে ব্যাকএন্ডে ওয়েব রাউট যুক্ত করা
+web_app.router.add_get("/gdrive/callback", gdrive_web_callback)
 
 
-# ----------------- [ ৩. গুগল ড্রাইভে আপলোড ও প্লে লিংক জেনারেটর ] -----------------
+# ----------------- [ ২. ১-ক্লিক লগইন বাটন ] -----------------
+
+@Client.on_message(filters.command("gdrive_login") & filters.private)
+async def gdrive_login_start(client: Client, message: Message):
+    if os.path.exists(TOKEN_FILE):
+        await message.reply_text("✅ আপনার গুগল ড্রাইভ অলরেডি কানেক্ট করা আছে!\nযেকোনো ভিডিওতে রিপ্লাই দিয়ে `/gdrive` লিখলেই কাজ করবে।")
+        return
+
+    client_config = {
+        "web": {
+            "client_id": GDRIVE_CLIENT_ID.strip(),
+            "client_secret": GDRIVE_CLIENT_SECRET.strip(),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token"
+        }
+    }
+
+    flow = Flow.from_client_config(client_config, SCOPES, redirect_uri=REDIRECT_URI)
+    auth_url, state = flow.authorization_url(prompt='consent', access_type='offline')
+
+    AUTH_FLOWS[state] = {
+        "flow": flow,
+        "client": client,
+        "user_id": message.from_user.id
+    }
+
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌐 Connect Google Drive (1-Click)", url=auth_url)]
+    ])
+
+    await message.reply_text(
+        "🔗 **গুগল ড্রাইভ ১-ক্লিকে কানেক্ট করুন:**\n\n"
+        "নিচের বাটনে চাপ দিয়ে আপনার জিমেইল সিলেক্ট করে **'Allow'** চাপুন। কোনো কোড কপি করতে হবে না, অটোমেটিক কানেক্ট হয়ে যাবে!",
+        reply_markup=buttons
+    )
+
+
+# ----------------- [ ৩. গুগল ড্রাইভে আপলোড হ্যান্ডলার ] -----------------
 
 @Client.on_message(filters.command("gdrive"))
 async def upload_to_gdrive(client: Client, message: Message):
@@ -129,7 +154,7 @@ async def upload_to_gdrive(client: Client, message: Message):
 
     target_msg = message.reply_to_message
     if not target_msg or not (target_msg.document or target_msg.video or target_msg.audio):
-        await message.reply_text("⚠️ অনুগ্রহ করে টেলিগ্রামের কোনো **ভিডিও বা ফাইলের** ওপর রিপ্লাই দিয়ে `/gdrive` কমান্ড দিন।")
+        await message.reply_text("⚠️ অনুগ্রহ করে কোনো **ভিডিও বা ফাইলের** ওপর রিপ্লাই দিয়ে `/gdrive` লিখুন।")
         return
 
     media = target_msg.document or target_msg.video or target_msg.audio
@@ -153,8 +178,7 @@ async def upload_to_gdrive(client: Client, message: Message):
     file_path = None
     try:
         file_path = await target_msg.download(progress=down_progress)
-
-        await status_msg.edit_text("☁️ **গুগল ড্রাইভে হাই-স্পিড ট্রান্সফার হচ্ছে...**")
+        await status_msg.edit_text("☁️ **গুগল ড্রাইভে আপলোড হচ্ছে (কোনো সার্ভার ব্যান্ডউইথ খরচ হবে না)...**")
 
         service = get_gdrive_service()
         file_metadata = {'name': file_name}
@@ -185,14 +209,12 @@ async def upload_to_gdrive(client: Client, message: Message):
             f"▶️ **সরাসরি প্লে / স্ট্রিম লিংক:**\n{stream_link}\n\n"
             f"🌐 **ওয়েবসাইটে প্লে করার কোড (Embed Iframe):**\n{embed_code}\n\n"
             f"⬇️ **ডিরেক্ট ডাউনলোড লিংক:**\n{direct_download}\n\n"
-            f"🤖 Powered by **@TGLinkBase Bridge**"
+            f"🤖 Powered by **OmniCore Bridge**"
         )
         await status_msg.edit_text(success_text, disable_web_page_preview=True)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ আপলোড ব্যর্থ হয়েছে: {e}")
-        print(f"[GDrive Error]: {e}")
-
     finally:
         if file_path and os.path.exists(file_path):
             try:
