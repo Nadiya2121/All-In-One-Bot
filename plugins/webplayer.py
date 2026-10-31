@@ -7,17 +7,23 @@ import time
 import uuid
 import asyncio
 import aiohttp
+from aiohttp import web
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.enums import ParseMode
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from motor.motor_asyncio import AsyncIOMotorClient
+from config import APP_URL, MONGO_URL
+from main import web_app
 
 HELP = {
-    "player": "ভিডিওর ওপর রিপ্লাই দিয়ে ওয়েবসাইটে প্লে করার Embed Iframe ও ব্লগার পোস্ট কোড পেতে",
-    "set_player <Login> <Key>": "Streamtape ফ্রি প্লেয়ার অ্যাকাউন্ট সেট করতে",
-    "my_player": "বর্তমান প্লেয়ার অ্যাকাউন্ট চেক করতে"
+    "player": "MongoDB চালিত পার্মানেন্ট পোস্টার সহ ব্লগার পোস্ট তৈরি করতে",
+    "set_player <Login> <Key>": "Streamtape অ্যাকাউন্ট ডাটাবেজে স্থায়ীভাবে সেভ করতে",
+    "my_player": "ডাটাবেজ থেকে প্লেয়ার অ্যাকাউন্ট চেক করতে"
 }
 
-CONFIG_FILE = "downloads/player_config.txt"
+# 🔥 MongoDB ডাটাবেজ কানেকশন 🔥
+mongo_client = AsyncIOMotorClient(MONGO_URL) if MONGO_URL and "আপনার_MONGO" not in MONGO_URL else None
+db = mongo_client["OmniCoreDB"] if mongo_client else None
 
 BLOGGER_TASKS = {}
 BLOGGER_STATES = {}
@@ -37,57 +43,37 @@ def get_progress_bar(current, total):
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] {percentage:.1f}%"
 
-def get_api_credentials():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            data = f.read().strip().split(":")
-            if len(data) >= 2:
-                return data[0].strip(), data[1].strip()
+async def get_api_credentials():
+    if db is not None:
+        doc = await db.settings.find_one({"_id": "streamtape"})
+        if doc:
+            return doc.get("login"), doc.get("key")
     return None, None
 
-# 🔥 ডাবল ইঞ্জিন স্থায়ী ইমেজ আপলোডার (Cloudflare বাইপাস সহ) 🔥
-async def upload_poster_permanently(image_path: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
 
-    # ১. প্রথম চেষ্টা: FreeImage CDN (অত্যন্ত দ্রুত ও নির্ভরযোগ্য)
-    try:
-        url = "https://freeimage.host/api/1/upload"
-        params = {"key": "6d207e02198a847e52c0a97b014f6e04", "format": "json"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            with open(image_path, "rb") as f:
-                data = aiohttp.FormData()
-                data.add_field("source", f)
-                async with session.post(url, params=params, data=data, timeout=15) as resp:
-                    if resp.status == 200:
-                        json_data = await resp.json()
-                        img_url = json_data.get("image", {}).get("url")
-                        if img_url:
-                            return img_url
-    except Exception as e:
-        print(f"[FreeImage Upload Error]: {e}")
+# 🔥 Koyeb সার্ভার দিয়ে সরাসরি MongoDB থেকে ছবি রেন্ডার করার ইঞ্জিন 🔥
+async def serve_mongo_poster(request):
+    filename = request.match_info.get("filename")
+    poster_id = filename.replace(".jpg", "")
 
-    # ২. দ্বিতীয় চেষ্টা (ব্যাকআপ): Catbox
-    try:
-        url = "https://catbox.moe/user/api.php"
-        async with aiohttp.ClientSession(headers=headers) as session:
-            with open(image_path, "rb") as f:
-                data = aiohttp.FormData()
-                data.add_field("reqtype", "fileupload")
-                data.add_field("fileToUpload", f)
-                async with session.post(url, data=data, timeout=15) as resp:
-                    if resp.status == 200:
-                        text_res = (await resp.text()).strip()
-                        if text_res.startswith("http"):
-                            return text_res
-    except Exception as e:
-        print(f"[Catbox Upload Error]: {e}")
+    if db is not None:
+        doc = await db.posters.find_one({"_id": poster_id})
+        if doc and "data" in doc:
+            # ব্রাউজারে ১ বছর ক্যাশ থাকবে, যাতে বারবার সার্ভারে লোড না পড়ে
+            return web.Response(
+                body=doc["data"],
+                content_type="image/jpeg",
+                headers={"Cache-Control": "public, max-age=31536000"}
+            )
+    return web.Response(status=404, text="Poster Not Found In Database")
 
-    return None
+try:
+    web_app.router.add_get("/posters/{filename}", serve_mongo_poster)
+except Exception:
+    pass
 
 
-# ----------------- [ ১. প্লেয়ার অ্যাকাউন্ট সেটআপ ] -----------------
+# ----------------- [ ১. প্লেয়ার অ্যাকাউন্ট ডাটাবেজে সেভ ] -----------------
 
 @Client.on_message(filters.command("set_player") & filters.private)
 async def set_player_creds(client: Client, message: Message):
@@ -95,29 +81,36 @@ async def set_player_creds(client: Client, message: Message):
         await message.reply_text("⚙️ **নিয়ম:** `/set_player API_LOGIN API_KEY`")
         return
 
+    if db is None:
+        await message.reply_text("❌ MongoDB কানেক্ট করা নেই! আগে `config.py`-তে MONGO_URL দিন।")
+        return
+
     login = message.command[1].strip()
     key = message.command[2].strip()
 
-    os.makedirs("downloads", exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        f.write(f"{login}:{key}")
+    # ডাটাবেজে স্থায়ীভাবে সেভ রাখা
+    await db.settings.update_one(
+        {"_id": "streamtape"},
+        {"$set": {"login": login, "key": key}},
+        upsert=True
+    )
 
-    await message.reply_text("🎉 **অভিনন্দন! আপনার ভিডিও প্লেয়ার অ্যাকাউন্ট সফলভাবে যুক্ত হয়েছে!**")
+    await message.reply_text("🎉 **অভিনন্দন! আপনার প্লেয়ার অ্যাকাউন্ট MongoDB ডাটাবেজে পার্মানেন্টলি সেভ হয়েছে!**\nKoyeb সার্ভার রিসেট হলেও এটি আর কখনোই মুছবে না।")
 
 @Client.on_message(filters.command("my_player") & filters.private)
 async def check_player_creds(client: Client, message: Message):
-    login, key = get_api_credentials()
+    login, key = await get_api_credentials()
     if login and key:
-        await message.reply_text(f"✅ **প্লেয়ার যুক্ত আছে!**\n👤 **Login ID:** `{login}`")
+        await message.reply_text(f"✅ **ডাটাবেজে যুক্ত আছে!**\n👤 **Login ID:** `{login}`")
     else:
-        await message.reply_text("❌ কোনো প্লেয়ার যুক্ত নেই! যুক্ত করতে লিখুন:\n`/set_player API_LOGIN API_KEY`")
+        await message.reply_text("❌ ডাটাবেজে কোনো প্লেয়ার অ্যাকাউন্ট নেই! লিখুন:\n`/set_player API_LOGIN API_KEY`")
 
 
 # ----------------- [ ২. ভিডিও আপলোড ও রেজাল্ট ] -----------------
 
 @Client.on_message(filters.command(["player", "embed"]))
 async def create_web_player(client: Client, message: Message):
-    api_login, api_key = get_api_credentials()
+    api_login, api_key = await get_api_credentials()
     if not api_login or not api_key:
         await message.reply_text("🔒 আগে প্লেয়ার অ্যাকাউন্ট যুক্ত করুন:\n`/set_player API_LOGIN API_KEY`")
         return
@@ -229,7 +222,7 @@ async def create_web_player(client: Client, message: Message):
                 pass
 
 
-# ----------------- [ ৩. ব্লগার পোস্ট ইন্টারঅ্যাকশন ] -----------------
+# ----------------- [ ৩. ব্লগার পোস্ট ও MongoDB ইমেজ সেভার ] -----------------
 
 @Client.on_callback_query(filters.regex(r"^blog_start_"))
 async def start_blogger_flow(client: Client, query: CallbackQuery):
@@ -274,23 +267,34 @@ async def blogger_input_listener(client: Client, message: Message):
             "এবার পোস্টের জন্য একটি পোস্টার বা কভার ছবি (Photo) পাঠান:"
         )
 
-    # ২. পোস্টার গ্রহণ ও সম্পূর্ণ মোবাইল-ফ্রেন্ডলি HTML পোস্ট তৈরি
+    # ২. পোস্টার গ্রহণ ও সরাসরি MongoDB-তে পার্মানেন্ট সেভ
     elif state["step"] == "waiting_poster" and message.photo:
-        status_msg = await message.reply_text("⚡ **পোস্টার ক্লাউড সিডিএন-এ সেভ হচ্ছে এবং সম্পূর্ণ কোড তৈরি হচ্ছে...**")
+        status_msg = await message.reply_text("⚡ **পোস্টার MongoDB ডাটাবেজে স্থায়ীভাবে সেভ হচ্ছে...**")
 
-        temp_img = f"downloads/poster_{user_id}.jpg"
+        poster_id = str(uuid.uuid4())[:10]
+        temp_img = f"downloads/temp_{poster_id}.jpg"
         await message.download(file_name=temp_img)
 
-        # ছবিটি স্থায়ীভাবে ক্লাউড সিডিএন-এ আপলোড
-        poster_url = await upload_poster_permanently(temp_img)
+        # ছবিটিকে ডাটাবেজে সেভ করা
+        if db is not None:
+            with open(temp_img, "rb") as f:
+                img_bytes = f.read()
+            await db.posters.update_one(
+                {"_id": poster_id},
+                {"$set": {"data": img_bytes, "created_at": time.time()}},
+                upsert=True
+            )
+
         if os.path.exists(temp_img):
             os.remove(temp_img)
 
-        poster_img_tag = f'<img src="{poster_url}" style="max-width: 100%; height: auto; max-height: 420px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" alt="{task["title"]}" />' if poster_url else ""
+        # আপনার Koyeb ডোমেইনের পার্মানেন্ট লিঙ্ক তৈরি
+        base_url = APP_URL.strip().rstrip("/")
+        if not base_url.startswith("http"):
+            base_url = f"https://{base_url}"
 
-        # যদি ছবি আপলোড ব্যর্থ হয় তবে মেসেজ দিয়ে সতর্ক করবে
-        if not poster_url:
-            await message.reply_text("⚠️ সতর্কতা: ছবিটি ক্লাউডে আপলোড হতে পারেনি, তাই ইমেজ ছাড়া পোস্ট তৈরি হয়েছে।")
+        poster_url = f"{base_url}/posters/{poster_id}.jpg"
+        poster_img_tag = f'<img src="{poster_url}" style="max-width: 100%; height: auto; max-height: 420px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" alt="{task["title"]}" />'
 
         blogger_html = f"""<div style="max-width: 750px; margin: auto; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
   <h2 style="background: #1e293b; color: #ffffff; padding: 18px 20px; margin: 0; text-align: center; font-size: 20px;">{task["title"]}</h2>
