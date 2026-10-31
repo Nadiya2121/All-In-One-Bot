@@ -1,5 +1,6 @@
 # plugins/webplayer.py
 import os
+import re
 import json
 import time
 import asyncio
@@ -34,8 +35,8 @@ def get_api_credentials():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             data = f.read().strip().split(":")
-            if len(data) == 2:
-                return data[0], data[1]
+            if len(data) >= 2:
+                return data[0].strip(), data[1].strip()
     return None, None
 
 
@@ -115,7 +116,7 @@ async def create_web_player(client: Client, message: Message):
 
         # ২. আপলোড লিংক পাওয়া
         upload_server_url = None
-        timeout = aiohttp.ClientTimeout(total=1800) # বড় ভিডিওর জন্য ৩০ মিনিট টাইমআউট
+        timeout = aiohttp.ClientTimeout(total=1800)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             url_req = f"https://api.streamtape.com/file/ul?login={api_login}&key={api_key}"
             async with session.get(url_req) as resp:
@@ -124,26 +125,36 @@ async def create_web_player(client: Client, message: Message):
                     upload_server_url = data["result"]["url"]
 
         if not upload_server_url:
-            await status_msg.edit_text("❌ ক্লাউড সার্ভার রেসপন্স করছে না। আপনার Login/Key সঠিক কিনা চেক করুন।")
+            await status_msg.edit_text("❌ ক্লাউড সার্ভার আপলোড লিংক দেয়নি। Login/Key সঠিক কিনা চেক করুন।")
             return
 
-        # ৩. ক্লাউডে সরাসরি ফাইল আপলোড (🔥 ফিক্সড রেসপন্স হ্যান্ডলার 🔥)
+        # ৩. ক্লাউডে সরাসরি ফাইল আপলোড
         file_id = None
+        raw_response = ""
         async with aiohttp.ClientSession(timeout=timeout) as session:
             with open(file_path, "rb") as f:
                 form_data = aiohttp.FormData()
                 form_data.add_field("file1", f, filename=file_name)
                 async with session.post(upload_server_url, data=form_data) as resp:
                     raw_response = await resp.text()
-                    try:
-                        res_data = json.loads(raw_response)
-                        if res_data.get("status") == 200:
-                            file_id = res_data["result"]["id"]
-                    except Exception:
-                        pass
 
+        # 🔥 ডাবল মেকানিজম দিয়ে ফাইল আইডি বের করা 🔥
+        try:
+            res_data = json.loads(raw_response)
+            if str(res_data.get("status")) == "200":
+                file_id = res_data.get("result", {}).get("id")
+        except Exception:
+            pass
+
+        # যদি JSON ফেল করে তবে সরাসরি টেক্সট স্ক্যান করে আইডি বের করা
         if not file_id:
-            await status_msg.edit_text("❌ ভিডিও আপলোড সম্পন্ন হলেও ফাইল আইডি পাওয়া যায়নি!")
+            id_match = re.search(r'"id"\s*:\s*"([^"]+)"', raw_response)
+            if id_match:
+                file_id = id_match.group(1)
+
+        # যদি কোনো কারণে ফাইল আইডি না পায় তবে সার্ভারের মেসেজ দেখাবে
+        if not file_id:
+            await status_msg.edit_text(f"❌ সার্ভার রেসপন্স করেছে কিন্তু আইডি পাওয়া যায়নি:\n`{raw_response[:300]}`")
             return
 
         # ৪. ওয়েবসাইট প্লেয়ার ও এমবেড লিংক জেনারেশন
