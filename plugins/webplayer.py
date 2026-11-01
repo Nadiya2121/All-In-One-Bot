@@ -155,8 +155,9 @@ async def create_web_player(client: Client, message: Message):
             await status_msg.edit_text(f"❌ আইডি পাওয়া যায়নি:\n<code>{raw_response[:200]}</code>", parse_mode=ParseMode.HTML)
             return
 
-        stream_link = f"https://streamtape.com/v/{file_id}"
-        raw_iframe = f'<iframe src="https://streamtape.com/e/{file_id}" width="100%" height="480" frameborder="0" allowfullscreen="true"></iframe>'
+        # 🔥 ফিক্স: streamta.pe অ্যান্টি-ব্লক ডোমেইন ও সিকিউরিটি পলিসি 🔥
+        stream_link = f"https://streamta.pe/v/{file_id}"
+        raw_iframe = f'<iframe src="https://streamta.pe/e/{file_id}" width="100%" height="480" frameborder="0" allowfullscreen="true" allow="autoplay; fullscreen; encrypted-media" referrerpolicy="no-referrer" scrolling="no"></iframe>'
         safe_embed_code = f"<code>{html.escape(raw_iframe)}</code>"
 
         task_id = str(uuid.uuid4())[:8]
@@ -270,6 +271,7 @@ async def blogger_input_listener(client: Client, message: Message):
         poster_url = f"{base_url}/posters/{poster_filename}"
         poster_img_tag = f'<img src="{poster_url}" style="max-width: 100%; height: auto; max-height: 420px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" alt="{task["title"]}" />'
 
+        # 🔥 ফিক্স: অ্যান্টি-ব্লক streamta.pe ও ক্রোম সিকিউরিটি বাইপাস সহ HTML 🔥
         blogger_html = f"""<div style="max-width: 750px; margin: auto; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
   <h2 style="background: #1e293b; color: #ffffff; padding: 18px 20px; margin: 0; text-align: center; font-size: 20px;">{task["title"]}</h2>
   
@@ -285,7 +287,7 @@ async def blogger_input_listener(client: Client, message: Message):
   </div>
 
   <div style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; margin: 20px; border-radius: 8px; background: #000;">
-    <iframe src="https://streamtape.com/e/{task["file_id"]}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0;" allowfullscreen="true" scrolling="no"></iframe>
+    <iframe src="https://streamta.pe/e/{task["file_id"]}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0;" allowfullscreen="true" allow="autoplay; fullscreen; encrypted-media" referrerpolicy="no-referrer" scrolling="no"></iframe>
   </div>
 
   <div style="text-align: center; padding: 0 20px 25px 20px;">
