@@ -14,7 +14,7 @@ from config import APP_URL
 from main import db
 
 HELP = {
-    "player": "ভিডিওতে রিপ্লাই দিয়ে লাইভ প্রিভিউ লিংক ও ব্লগার কোড পেতে",
+    "player": "ভিডিওতে রিপ্লাই দিয়ে ১ বা একাধিক ভিডিওর ডেমো ও ১-ক্লিক কোড পেতে",
     "set_player <Login> <Key>": "Streamtape অ্যাকাউন্ট ডাটাবেজে স্থায়ীভাবে সেভ করতে",
     "my_player": "ডাটাবেজ থেকে প্লেয়ার অ্যাকাউন্ট চেক করতে"
 }
@@ -283,7 +283,7 @@ async def blogger_multi_listener(client: Client, message: Message):
             "এবার পোস্টের জন্য একটি কভার ছবি (Photo) পাঠান:"
         )
 
-    # গ. পোস্টার গ্রহণ, ডাটাবেজ সেভ ও লাইভ প্রিভিউ লিংক তৈরি
+    # গ. পোস্টার গ্রহণ, ডাটাবেজ সেভ ও সরাসরি লাইভ ডেমো পেজ তৈরি
     elif state["step"] == "waiting_poster" and message.photo:
         status_msg = await message.reply_text("⚡ **পোস্টার ও লাইভ ডেমো পেজ তৈরি হচ্ছে...**")
 
@@ -338,7 +338,6 @@ async def blogger_multi_listener(client: Client, message: Message):
             f'</div>'
         )
 
-        # 🔥 লাইভ প্রিভিউ ডাটাবেজে ও লিংকে সেভ করা 🔥
         preview_id = f"p_{task_id}"
         if db is not None:
             await db.previews.update_one(
@@ -348,36 +347,19 @@ async def blogger_multi_listener(client: Client, message: Message):
             )
 
         preview_url = f"{base_url}/preview/{preview_id}"
-        safe_blogger_code = f"<code>{html.escape(blogger_html)}</code>"
 
-        # 🔥 প্রিভিউ দেখার বাটন 🔥
+        # 🔥 আর কোনো ফাইল পাঠানো হবে না! সরাসরি পেজ লিংক দেওয়া হবে 🔥
         preview_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👁️ লাইভ প্রিভিউ দেখুন (Live Preview)", url=preview_url)]
+            [InlineKeyboardButton("🌐 ডেমো দেখুন ও কোড কপি করুন", url=preview_url)]
         ])
 
         result_text = (
-            f"🎉 <b>আপনার মোট {total_vids}টি ভিডিও সহ সম্পূর্ণ সিরিয়াল পোস্ট প্রস্তুত!</b>\n\n"
-            f"🌐 <b>লাইভ ডেমো লিংক:</b>\n{preview_url}\n\n"
-            "📋 <b>কপি করার নিয়ম:</b>\n"
-            "নিচের কোড বক্সে <b>একবার ট্যাপ করলেই পুরো কোডটি কপি হয়ে যাবে</b>। এরপর ব্লগারে পেস্ট করে Publish করে দিন:\n\n"
-            f"{safe_blogger_code}"
+            f"🎉 <b>আপনার মোট {total_vids}টি ভিডিওর সম্পূর্ণ পোস্ট রেডি!</b>\n\n"
+            f"👇 <b>নিচের বাটনে চাপ দিন:</b>\n"
+            f"সেখানে সরাসরি ভিডিওর লাইভ ডেমো দেখতে পাবেন এবং পেজের ওপরে থাকা <b>'কপি কোড' বাটন</b> চেপে এক ক্লিকে পুরো কোড কপি করে নিতে পারবেন!\n\n"
+            f"🔗 <b>লিংক:</b> {preview_url}"
         )
 
-        if len(result_text) <= 4000:
-            await status_msg.edit_text(result_text, reply_markup=preview_button, parse_mode=ParseMode.HTML)
-        else:
-            txt_file = f"downloads/blogger_post_{task_id}.txt"
-            with open(txt_file, "w", encoding="utf-8") as f:
-                f.write(blogger_html)
-
-            await message.reply_document(
-                document=txt_file,
-                caption=f"🎉 <b>আপনার মোট {total_vids}টি ভিডিওর কোড অনেক বড় হওয়ায় ফাইল আকারে দেওয়া হলো!</b>\n\n🌐 লাইভ প্রিভিউ দেখতে নিচের বাটনে চাপুন:",
-                reply_markup=preview_button
-            )
-            await status_msg.delete()
-            if os.path.exists(txt_file):
-                os.remove(txt_file)
-
+        await status_msg.edit_text(result_text, reply_markup=preview_button, parse_mode=ParseMode.HTML)
         BLOGGER_STATES.pop(user_id, None)
         BLOGGER_TASKS.pop(task_id, None)
