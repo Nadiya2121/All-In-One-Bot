@@ -14,7 +14,7 @@ from config import APP_URL
 from main import db
 
 HELP = {
-    "player": "ভিডিওতে রিপ্লাই দিয়ে ১ বা একাধিক ভিডিও সিরিয়াল করে ব্লগার কোড পেতে",
+    "player": "ভিডিওতে রিপ্লাই দিয়ে লাইভ প্রিভিউ লিংক ও ব্লগার কোড পেতে",
     "set_player <Login> <Key>": "Streamtape অ্যাকাউন্ট ডাটাবেজে স্থায়ীভাবে সেভ করতে",
     "my_player": "ডাটাবেজ থেকে প্লেয়ার অ্যাকাউন্ট চেক করতে"
 }
@@ -47,7 +47,6 @@ async def get_api_credentials():
             pass
     return None, None
 
-# ভিডিও আপলোড করার কমন ফাংশন
 async def upload_to_streamtape(file_path, file_name, api_login, api_key):
     upload_server_url = None
     timeout = aiohttp.ClientTimeout(total=1800)
@@ -182,7 +181,7 @@ async def create_web_player(client: Client, message: Message):
             f"📁 <b>ফাইলের নাম:</b> <code>{file_name}</code>\n"
             f"💾 <b>সাইজ:</b> <code>{humanbytes(file_size)}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💡 <i>আপনি কি এই পোস্টে আরও ভিডিও (ভিডিও ২, ৩) যোগ করতে চান, নাকি এখনই পোস্ট কোড তৈরি করবেন?</i>"
+            f"💡 <i>আপনি কি এই পোস্টে আরও ভিডিও যোগ করতে চান, নাকি এখনই পোস্ট কোড তৈরি করবেন?</i>"
         )
         await status_msg.edit_text(success_text, reply_markup=buttons, parse_mode=ParseMode.HTML)
 
@@ -207,14 +206,12 @@ async def blogger_button_actions(client: Client, query: CallbackQuery):
         await query.answer("❌ টাস্কটির মেয়াদ শেষ হয়ে গেছে! আবার /player দিন।", show_alert=True)
         return
 
-    # আরও ভিডিও যোগ করার বাটন চাপলে
     if "add" in query.data:
         next_num = len(task["videos"]) + 1
         BLOGGER_STATES[query.from_user.id] = {"task_id": task_id, "step": "waiting_next_video"}
         await query.message.reply_text(f"🎬 **দয়া করে ভিডিও {next_num} পাঠান:**")
         await query.answer()
 
-    # পোস্ট কোড তৈরি করার বাটন চাপলে
     elif "blog" in query.data:
         BLOGGER_STATES[query.from_user.id] = {"task_id": task_id, "step": "waiting_title"}
         await query.message.reply_text("📝 **ধাপ ১/২: পোস্টের টাইটেল দিন**\n\nব্লগ পোস্টের মূল টাইটেলটি লিখে পাঠান:")
@@ -286,9 +283,9 @@ async def blogger_multi_listener(client: Client, message: Message):
             "এবার পোস্টের জন্য একটি কভার ছবি (Photo) পাঠান:"
         )
 
-    # গ. পোস্টার গ্রহণ ও ১, ২, ৩ সিরিয়াল পোস্ট HTML তৈরি
+    # গ. পোস্টার গ্রহণ, ডাটাবেজ সেভ ও লাইভ প্রিভিউ লিংক তৈরি
     elif state["step"] == "waiting_poster" and message.photo:
-        status_msg = await message.reply_text("⚡ **পোস্টার ডাটাবেজে সেভ হচ্ছে এবং সিরিয়াল পোস্ট কোড তৈরি হচ্ছে...**")
+        status_msg = await message.reply_text("⚡ **পোস্টার ও লাইভ ডেমো পেজ তৈরি হচ্ছে...**")
 
         poster_id = str(uuid.uuid4())[:8]
         poster_filename = f"{poster_id}.jpg"
@@ -311,57 +308,76 @@ async def blogger_multi_listener(client: Client, message: Message):
             base_url = f"https://{base_url}"
 
         poster_url = f"{base_url}/posters/{poster_filename}"
-        poster_img_tag = f'<img src="{poster_url}" style="max-width: 100%; height: auto; max-height: 480px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" alt="{task["title"]}" />'
+        poster_img_tag = f'<img src="{poster_url}" style="max-width:100%;height:auto;max-height:480px;border-radius:8px;margin:auto;" alt="{task["title"]}"/>'
 
-        # 🔥 সব ভিডিও সিরিয়াল ১, ২, ৩ করে নিচে নিচে সাজানো 🔥
         videos_html = ""
         total_vids = len(task["videos"])
 
         for idx, vid in enumerate(task["videos"], start=1):
             vid_title = f"🎬 ভিডিও {idx} (Part {idx})" if total_vids > 1 else "🎬 সম্পূর্ণ ভিডিও প্লেয়ার"
-            videos_html += f"""
-  <!-- ভিডিও {idx} ব্লক -->
-  <div style="margin-top: 25px; padding-top: 15px; border-top: 1px dashed rgba(255,255,255,0.15);">
-    <h3 style="color: #ff0055; margin: 0 0 10px 0; font-size: 17px; font-weight: 700;">{vid_title}</h3>
-    <div style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; border-radius: 8px; background: #000;">
-      <iframe src="https://streamta.pe/e/{vid["file_id"]}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0;" allowfullscreen="true" allow="autoplay; fullscreen; encrypted-media" referrerpolicy="no-referrer" scrolling="no"></iframe>
-    </div>
-    <div style="text-align: center; margin: 12px 0 15px 0;">
-      <a href="{vid["stream_link"]}" target="_blank" style="background: linear-gradient(135deg, #ff0055, #ff5500); color: #ffffff; padding: 9px 20px; text-decoration: none; border-radius: 99px; font-weight: 700; font-size: 13px; display: inline-block;">
-        ⬇️ ভিডিও {idx} সরাসরি ফুল স্ক্রিনে দেখতে চাপুন
-      </a>
-    </div>
-  </div>"""
+            videos_html += (
+                f'<div style="margin-top:20px;padding-top:10px;border-top:1px dashed #334155;">'
+                f'<h3 style="color:#ff0055;margin:0 0 8px 0;font-size:16px;">{vid_title}</h3>'
+                f'<div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:8px;background:#000;">'
+                f'<iframe src="https://streamta.pe/e/{vid["file_id"]}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" allowfullscreen="true" allow="autoplay; fullscreen; encrypted-media" referrerpolicy="no-referrer" scrolling="no"></iframe>'
+                f'</div>'
+                f'<div style="text-align:center;margin:10px 0 12px 0;">'
+                f'<a href="{vid["stream_link"]}" target="_blank" style="background:linear-gradient(135deg,#ff0055,#ff5500);color:#fff;padding:8px 18px;text-decoration:none;border-radius:99px;font-weight:700;font-size:13px;display:inline-block;">⬇️ ভিডিও {idx} ফুল স্ক্রিনে দেখতে চাপুন</a>'
+                f'</div></div>'
+            )
 
-        # সম্পূর্ণ ব্লগার HTML কোড
-        blogger_html = f"""<div style="max-width: 750px; margin: auto; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-  <h2 style="background: #1e293b; color: #ffffff; padding: 18px 20px; margin: 0; text-align: center; font-size: 20px;">{task["title"]}</h2>
-  
-  <div style="text-align: center; padding: 20px 20px 10px 20px;">
-    {poster_img_tag}
-  </div>
+        blogger_html = (
+            f'<div style="max-width:750px;margin:auto;font-family:sans-serif;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">'
+            f'<h2 style="background:#1e293b;color:#fff;padding:16px;margin:0;text-align:center;font-size:19px;">{task["title"]}</h2>'
+            f'<div style="text-align:center;padding:15px 15px 5px 15px;">{poster_img_tag}</div>'
+            f'<div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:12px;margin:12px 15px;border-radius:6px;">'
+            f'<h4 style="margin:0 0 4px 0;color:#b45309;font-size:15px;">⚠️ ভিডিও চালু করার নিয়ম:</h4>'
+            f'<p style="margin:0;color:#92400e;font-size:13px;line-height:1.4;">প্লে বাটনে ক্লিক করুন। <b>প্রথম ক্লিকে বিজ্ঞাপনে নিয়ে গেলে ব্যাক (Back) চেপে কেটে দিন।</b> এরপর পুনরায় প্লে বাটনে চাপুন, ভিডিও সরাসরি চালু হয়ে যাবে!</p>'
+            f'</div>'
+            f'<div style="padding:0 15px 15px 15px;">{videos_html}</div>'
+            f'</div>'
+        )
 
-  <div style="background-color: #fffbeb; border-left: 5px solid #f59e0b; padding: 15px; margin: 15px 20px; border-radius: 6px;">
-    <h4 style="margin: 0 0 5px 0; color: #b45309; font-size: 16px;">⚠️ বিশেষ নির্দেশনা (ভিডিও চালু করার নিয়ম):</h4>
-    <p style="margin: 0; color: #92400e; font-size: 14px; line-height: 1.5;">
-      নিচের প্লে বাটনে ক্লিক করুন। <b>প্রথম ক্লিকে কোনো নতুন পেজ বা বিজ্ঞাপনে নিয়ে গেলে ব্যাক (Back) বাটনে চাপ দিয়ে কেটে দিন।</b> এরপর পুনরায় প্লে বাটনে চাপুন, ভিডিও সরাসরি চালু হয়ে যাবে!
-    </p>
-  </div>
+        # 🔥 লাইভ প্রিভিউ ডাটাবেজে ও লিংকে সেভ করা 🔥
+        preview_id = f"p_{task_id}"
+        if db is not None:
+            await db.previews.update_one(
+                {"_id": preview_id},
+                {"$set": {"html": blogger_html, "created_at": time.time()}},
+                upsert=True
+            )
 
-  <div style="padding: 0 20px;">
-    {videos_html}
-  </div>
-</div>"""
-
+        preview_url = f"{base_url}/preview/{preview_id}"
         safe_blogger_code = f"<code>{html.escape(blogger_html)}</code>"
+
+        # 🔥 প্রিভিউ দেখার বাটন 🔥
+        preview_button = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👁️ লাইভ প্রিভিউ দেখুন (Live Preview)", url=preview_url)]
+        ])
 
         result_text = (
             f"🎉 <b>আপনার মোট {total_vids}টি ভিডিও সহ সম্পূর্ণ সিরিয়াল পোস্ট প্রস্তুত!</b>\n\n"
+            f"🌐 <b>লাইভ ডেমো লিংক:</b>\n{preview_url}\n\n"
             "📋 <b>কপি করার নিয়ম:</b>\n"
-            "নিচের কোড বক্সে <b>একবার ট্যাপ করলেই পুরো কোডটি কপি হয়ে যাবে</b>। এরপর ব্লগারের পোস্ট এডিটরে গিয়ে <b>&lt;&gt; HTML View</b>-তে পেস্ট করে Publish করে দিন!\n\n"
+            "নিচের কোড বক্সে <b>একবার ট্যাপ করলেই পুরো কোডটি কপি হয়ে যাবে</b>। এরপর ব্লগারে পেস্ট করে Publish করে দিন:\n\n"
             f"{safe_blogger_code}"
         )
 
-        await status_msg.edit_text(result_text, parse_mode=ParseMode.HTML)
+        if len(result_text) <= 4000:
+            await status_msg.edit_text(result_text, reply_markup=preview_button, parse_mode=ParseMode.HTML)
+        else:
+            txt_file = f"downloads/blogger_post_{task_id}.txt"
+            with open(txt_file, "w", encoding="utf-8") as f:
+                f.write(blogger_html)
+
+            await message.reply_document(
+                document=txt_file,
+                caption=f"🎉 <b>আপনার মোট {total_vids}টি ভিডিওর কোড অনেক বড় হওয়ায় ফাইল আকারে দেওয়া হলো!</b>\n\n🌐 লাইভ প্রিভিউ দেখতে নিচের বাটনে চাপুন:",
+                reply_markup=preview_button
+            )
+            await status_msg.delete()
+            if os.path.exists(txt_file):
+                os.remove(txt_file)
+
         BLOGGER_STATES.pop(user_id, None)
         BLOGGER_TASKS.pop(task_id, None)
