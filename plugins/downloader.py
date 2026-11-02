@@ -1,5 +1,6 @@
 # plugins/downloader.py
 import os
+import re
 import time
 import asyncio
 import uuid
@@ -26,7 +27,7 @@ def humanbytes(size):
     return f"{size:.2f} {unit}"
 
 def format_duration(seconds):
-    if not seconds:
+    if not seconds or seconds <= 0:
         return "00:00"
     mins, secs = divmod(int(seconds), 60)
     hours, mins = divmod(mins, 60)
@@ -40,16 +41,55 @@ def get_progress_bar(current, total):
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] {percentage:.1f}%"
 
+# 🔥 ৪-লেয়ারের বুলেটপ্রুফ ডিউরেশন স্ক্যানার (যেকোনো WEB-DL মুভির সঠিক সময় বের করবে) 🔥
 def get_exact_duration(file_path):
+    if not file_path or not os.path.exists(file_path):
+        return 0
+
+    # ১. পদ্ধতি: ffprobe ফরম্যাট হেডার
     try:
         cmd = [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", file_path
         ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        return float(result.stdout.strip())
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        out = res.stdout.strip()
+        if out and out != "N/A":
+            val = float(out)
+            if val > 0:
+                return val
     except Exception:
-        return 0
+        pass
+
+    # ২. পদ্ধতি: ffprobe ভিডিও স্ট্রিম হেডার
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        out = res.stdout.strip()
+        if out and out != "N/A":
+            val = float(out)
+            if val > 0:
+                return val
+    except Exception:
+        pass
+
+    # ৩. পদ্ধতি: ffmpeg ডিপ-মেটাডাটা স্ক্যান (সবচেয়ে নিখুঁত)
+    try:
+        cmd = ["ffmpeg", "-i", file_path]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", res.stderr)
+        if match:
+            h, m, s = match.groups()
+            total_sec = int(h) * 3600 + int(m) * 60 + float(s)
+            if total_sec > 0:
+                return total_sec
+    except Exception:
+        pass
+
+    return 0
 
 def run_yt_dlp(url: str, download_path: str, progress_hook):
     ydl_opts = {
@@ -110,6 +150,7 @@ async def media_downloader(client: Client, message: Message):
         loop = asyncio.get_running_loop()
         file_path, title, duration = await loop.run_in_executor(None, run_yt_dlp, url, temp_template, progress_hook)
         
+        # 🔥 নিখুঁত সময়কাল বের করা 🔥
         if not duration or duration == 0:
             duration = get_exact_duration(file_path)
 
@@ -197,9 +238,15 @@ async def button_handler(client: Client, query: CallbackQuery):
                 last_edit = now
 
         try:
+            # 🔥 আপলোডের ঠিক আগে ফাইনাল সময়কাল রি-চেক করা 🔥
+            if not task.get("duration") or task["duration"] == 0:
+                task["duration"] = get_exact_duration(task["file_path"])
+
+            duration_secs = int(task["duration"]) if task.get("duration") else 0
+
             caption = (
                 f"🎬 **শিরোনাম:** `{task['title']}`\n"
-                f"⏱ **সময়কাল:** `{format_duration(task['duration'])}`\n"
+                f"⏱ **সময়কাল:** `{format_duration(duration_secs)}`\n"
                 f"💾 **সাইজ:** `{humanbytes(task['filesize'])}`\n\n"
                 f"🤖 Powered by **OmniCore**"
             )
@@ -207,7 +254,7 @@ async def button_handler(client: Client, query: CallbackQuery):
             await query.message.reply_video(
                 video=task["file_path"],
                 caption=caption,
-                duration=int(task["duration"]),
+                duration=duration_secs,
                 thumb=task["thumb"],
                 progress=upload_progress
             )
@@ -223,10 +270,8 @@ async def button_handler(client: Client, query: CallbackQuery):
             TASKS.pop(task_id, None)
 
 
-# 🔥 ম্যাজিক ফিক্স: কোনো কমান্ড যেন আর কখনো না আটকায় 🔥
 @Client.on_message(filters.private & ~filters.command([]) & (filters.text | filters.photo), group=2)
 async def input_listener(client: Client, message: Message):
-    # যদি মেসেজটি কোনো কমান্ড হয় (যেমন: /song, /mail) তবে ছেড়ে দেবে
     if message.text and message.text.startswith("/"):
         raise ContinuePropagation
 
@@ -250,6 +295,10 @@ async def input_listener(client: Client, message: Message):
         task["file_path"] = new_path
         task["title"] = new_name
         
+        # রিনেম করার পরও সময়কাল যাতে নষ্ট না হয়
+        if not task.get("duration") or task["duration"] == 0:
+            task["duration"] = get_exact_duration(new_path)
+
         USER_STATES.pop(message.from_user.id, None)
         await message.reply_text(f"✅ ফাইলের নাম পরিবর্তন করে `{new_name}` করা হয়েছে!\nএখন আগের মেন্যুতে গিয়ে **Done** চাপুন।")
 
