@@ -2,6 +2,7 @@
 import os
 import re
 import time
+import struct
 import asyncio
 import uuid
 import aiohttp
@@ -41,12 +42,45 @@ def get_progress_bar(current, total):
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] {percentage:.1f}%"
 
-# 🔥 ৪-লেয়ারের বুলেটপ্রুফ ডিউরেশন স্ক্যানার (যেকোনো WEB-DL মুভির সঠিক সময় বের করবে) 🔥
+
+# 🔥 কোনো ffprobe ছাড়া সরাসরি পাইথন দিয়ে MP4 মেমোরি থেকে নিখুঁত সময় বের করার ইঞ্জিন 🔥
 def get_exact_duration(file_path):
     if not file_path or not os.path.exists(file_path):
         return 0
 
-    # ১. পদ্ধতি: ffprobe ফরম্যাট হেডার
+    # ১. নেটিভ পাইথন MP4 হেডার রিডার (১০০% কাজ করবে ffprobe ছাড়া)
+    try:
+        file_size = os.path.getsize(file_path)
+        with open(file_path, "rb") as f:
+            # ফাইলের শুরুর ৫ মেগাবাইট স্ক্যান করা
+            chunk = f.read(min(file_size, 5 * 1024 * 1024))
+            pos = chunk.find(b"mvhd")
+
+            # শুরুতে না পেলে শেষের ৫ মেগাবাইট স্ক্যান করা
+            if pos == -1 and file_size > 5 * 1024 * 1024:
+                f.seek(file_size - (5 * 1024 * 1024))
+                chunk = f.read(5 * 1024 * 1024)
+                pos = chunk.find(b"mvhd")
+
+            if pos != -1:
+                pos += 4  # skip 'mvhd'
+                version = chunk[pos]
+                pos += 4  # skip version + flags
+                if version == 1:
+                    pos += 16  # skip 64-bit creation & mod time
+                    timescale, duration = struct.unpack(">IQ", chunk[pos:pos+12])
+                else:
+                    pos += 8   # skip 32-bit creation & mod time
+                    timescale, duration = struct.unpack(">II", chunk[pos:pos+8])
+
+                if timescale > 0 and duration > 0:
+                    calculated_dur = duration / timescale
+                    if calculated_dur > 0:
+                        return calculated_dur
+    except Exception as e:
+        print(f"[Native Duration Parse Error]: {e}")
+
+    # ২. ব্যাকআপ হিসেবে ffprobe চেক (যদি কখনো সার্ভারে থাকে)
     try:
         cmd = [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -55,41 +89,12 @@ def get_exact_duration(file_path):
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         out = res.stdout.strip()
         if out and out != "N/A":
-            val = float(out)
-            if val > 0:
-                return val
-    except Exception:
-        pass
-
-    # ২. পদ্ধতি: ffprobe ভিডিও স্ট্রিম হেডার
-    try:
-        cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        out = res.stdout.strip()
-        if out and out != "N/A":
-            val = float(out)
-            if val > 0:
-                return val
-    except Exception:
-        pass
-
-    # ৩. পদ্ধতি: ffmpeg ডিপ-মেটাডাটা স্ক্যান (সবচেয়ে নিখুঁত)
-    try:
-        cmd = ["ffmpeg", "-i", file_path]
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", res.stderr)
-        if match:
-            h, m, s = match.groups()
-            total_sec = int(h) * 3600 + int(m) * 60 + float(s)
-            if total_sec > 0:
-                return total_sec
+            return float(out)
     except Exception:
         pass
 
     return 0
+
 
 def run_yt_dlp(url: str, download_path: str, progress_hook):
     ydl_opts = {
@@ -150,9 +155,10 @@ async def media_downloader(client: Client, message: Message):
         loop = asyncio.get_running_loop()
         file_path, title, duration = await loop.run_in_executor(None, run_yt_dlp, url, temp_template, progress_hook)
         
-        # 🔥 নিখুঁত সময়কাল বের করা 🔥
-        if not duration or duration == 0:
-            duration = get_exact_duration(file_path)
+        # 🔥 সরাসরি ফাইল থেকে আসল সময় বের করা 🔥
+        exact_dur = get_exact_duration(file_path)
+        if exact_dur > 0:
+            duration = exact_dur
 
         filesize = os.path.getsize(file_path)
 
@@ -238,9 +244,10 @@ async def button_handler(client: Client, query: CallbackQuery):
                 last_edit = now
 
         try:
-            # 🔥 আপলোডের ঠিক আগে ফাইনাল সময়কাল রি-চেক করা 🔥
-            if not task.get("duration") or task["duration"] == 0:
-                task["duration"] = get_exact_duration(task["file_path"])
+            # 🔥 আপলোডের ঠিক আগে আবার কনফার্ম করা 🔥
+            exact_dur = get_exact_duration(task["file_path"])
+            if exact_dur > 0:
+                task["duration"] = exact_dur
 
             duration_secs = int(task["duration"]) if task.get("duration") else 0
 
@@ -251,6 +258,7 @@ async def button_handler(client: Client, query: CallbackQuery):
                 f"🤖 Powered by **OmniCore**"
             )
 
+            # টেলিগ্রামের প্লেয়ারে সঠিক duration_secs পাঠিয়ে দেওয়া
             await query.message.reply_video(
                 video=task["file_path"],
                 caption=caption,
@@ -294,10 +302,11 @@ async def input_listener(client: Client, message: Message):
         os.rename(task["file_path"], new_path)
         task["file_path"] = new_path
         task["title"] = new_name
-        
-        # রিনেম করার পরও সময়কাল যাতে নষ্ট না হয়
-        if not task.get("duration") or task["duration"] == 0:
-            task["duration"] = get_exact_duration(new_path)
+
+        # রিনেম করার পর নতুন ফাইল থেকে সময় আপডেট করা
+        exact_dur = get_exact_duration(new_path)
+        if exact_dur > 0:
+            task["duration"] = exact_dur
 
         USER_STATES.pop(message.from_user.id, None)
         await message.reply_text(f"✅ ফাইলের নাম পরিবর্তন করে `{new_name}` করা হয়েছে!\nএখন আগের মেন্যুতে গিয়ে **Done** চাপুন।")
