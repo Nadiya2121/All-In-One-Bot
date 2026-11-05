@@ -7,10 +7,11 @@ from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired
 from pyrogram.types import Message
 from config import API_ID, API_HASH, OWNER_ID
+from main import db  # 🔥 ডাটাবেজ কানেক্ট করা হলো যাতে সব অ্যাডমিনকে চেনা যায় 🔥
 
 HELP = {
     "save <লিংক>": "পাবলিক/প্রাইভেট বা অন্য বটের লক ফাইল আনলক করতে",
-    "login": "প্রাইভেট চ্যানেল বা অন্য বটের জন্য নিজের আইডি লগইন করতে",
+    "login": "যেকোনো অনুমোদিত অ্যাডমিন আইডি দিয়ে বটের ভেতরে লগইন করতে",
     "logout": "সংরক্ষিত একাউন্ট লগআউট করতে",
     "myaccount": "বর্তমানে কোনো একাউন্ট লগইন আছে কিনা দেখতে"
 }
@@ -33,6 +34,23 @@ def get_progress_bar(current, total):
     filled = int(percentage // 10)
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] {percentage:.1f}%"
+
+# 🔥 মিরর ডাটাবেজ থেকে সব অ্যাডমিন চেক করার অটো-ইঞ্জিন 🔥
+async def is_authorized_admin(user_id: int):
+    # ১. যদি মূল মালিক হয়
+    if user_id == OWNER_ID:
+        return True
+    
+    # ২. মিরর সিস্টেমে /add_admin দিয়ে যুক্ত করা অ্যাডমিন কিনা চেক করা
+    if db is not None:
+        try:
+            doc = await asyncio.wait_for(db.settings.find_one({"_id": "mirror_config"}), timeout=4)
+            if doc and user_id in doc.get("admins", []):
+                return True
+        except Exception:
+            pass
+            
+    return False
 
 # সংরক্ষিত সেশন থেকে ইউজারবট চালু করা
 async def get_user_client():
@@ -64,12 +82,17 @@ def parse_link(text: str):
     return None, None
 
 
-# ----------------- [ ১. ইন-বট লগইন সিস্টেম ] -----------------
+# ----------------- [ ১. ইন-বট লগইন সিস্টেম (সব অ্যাডমিনের জন্য) ] -----------------
 
 @Client.on_message(filters.command("login") & filters.private)
 async def login_start(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
-        await message.reply_text("❌ শুধুমাত্র বটের মালিক এই লগইন ফিচারটি ব্যবহার করতে পারবেন!")
+    # যেকোনো অনুমোদিত অ্যাডমিন কিনা যাচাই
+    if not await is_authorized_admin(message.from_user.id):
+        await message.reply_text(
+            f"❌ **অনুমতি নেই!**\n\n"
+            f"👤 আপনার টেলিগ্রাম আইডি: `{message.from_user.id}`\n\n"
+            f"💡 _শুধুমাত্র অনুমোদিত অ্যাডমিনরা লগইন করতে পারবেন। মূল আইডি থেকে `/add_admin {message.from_user.id}` দিয়ে এই আইডিটি অ্যাডমিন বানিয়ে নিন।_"
+        )
         return
 
     if os.path.exists(SESSION_FILE):
@@ -86,7 +109,7 @@ async def login_start(client: Client, message: Message):
 @Client.on_message(filters.command("logout") & filters.private)
 async def logout_user(client: Client, message: Message):
     global user_client
-    if message.from_user.id != OWNER_ID:
+    if not await is_authorized_admin(message.from_user.id):
         return
 
     if os.path.exists(SESSION_FILE):
@@ -100,6 +123,9 @@ async def logout_user(client: Client, message: Message):
 
 @Client.on_message(filters.command("myaccount") & filters.private)
 async def check_account(client: Client, message: Message):
+    if not await is_authorized_admin(message.from_user.id):
+        return
+
     u_cli = await get_user_client()
     if u_cli:
         me = await u_cli.get_me()
@@ -150,13 +176,12 @@ async def login_input_handler(client: Client, message: Message):
             session_str = await temp_cli.export_session_string()
             await temp_cli.disconnect()
 
-            # সেশন লোকাল ফাইলে সেভ
             os.makedirs("downloads", exist_ok=True)
             with open(SESSION_FILE, "w") as f:
                 f.write(session_str)
 
             LOGIN_DATA.pop(user_id, None)
-            await message.reply_text("🎉 **অভিনন্দন! সফলভাবে একাউন্ট লগইন হয়েছে।**\nএখন আপনি যেকোনো প্রাইভেট চ্যানেল বা অন্য বটের লক ফাইল নামাতে পারবেন!")
+            await message.reply_text("🎉 **অভিনন্দন! সফলভাবে একাউন্ট লগইন হয়েছে।**\nএখন যেকোনো অ্যাডমিন এই সেশন দিয়ে লক ফাইল বা মিরর চালাতে পারবেন!")
 
         except SessionPasswordNeeded:
             LOGIN_DATA[user_id]["step"] = "waiting_2fa"
@@ -212,19 +237,17 @@ async def smart_saver(client: Client, message: Message):
     target_msg = None
     fetcher_client = client
 
-    # ১. প্রথমে বট নিজে পাবলিক চ্যানেলে চেষ্টা করবে
     try:
         target_msg = await client.get_messages(chat_id, msg_id)
     except Exception:
         target_msg = None
 
-    # ২. বট না পারলে (প্রাইভেট চ্যানেল বা অন্য বট হলে) লগইন করা একাউন্ট দিয়ে আনবে
     if not target_msg or target_msg.empty:
         u_cli = await get_user_client()
         if not u_cli:
             await status_msg.edit_text(
                 "🔒 **এই ফাইলটি প্রাইভেট বা অন্য বটের চ্যাটে রয়েছে!**\n\n"
-                "💡 এটি ডাউনলোড করতে আগে বটে এসে `/login` লিখে আপনার আইডি লগইন করে নিন।"
+                "💡 এটি ডাউনলোড করতে আগে অনুমোদিত অ্যাডমিন আইডি থেকে এসে `/login` করে নিন।"
             )
             return
 
