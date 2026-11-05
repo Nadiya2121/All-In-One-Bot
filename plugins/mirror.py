@@ -11,47 +11,144 @@ HELP = {
     "set_target <চ্যানেল_আইডি>": "যে চ্যানেলে পোস্ট যাবে সেটি সেট করতে",
     "add_source <চ্যানেল_আইডি>": "যে চ্যানেল থেকে কপি হবে সেটি যোগ করতে",
     "del_source <চ্যানেল_আইডি>": "সোর্স চ্যানেল লিস্ট থেকে বাদ দিতে",
-    "set_caption <আপনার_লেখা>": "পোস্টের নিচে আপনার নিজস্ব ক্যাপশন/সিগনেচার সেট করতে",
-    "mirror_toggle": "অটো-মিরর চালু বা বন্ধ করতে"
+    "set_caption <লেখা>": "পোস্টের নিচে আপনার নিজস্ব ক্যাপশন সেট করতে",
+    "mirror_toggle": "অটো-মিরর চালু বা বন্ধ করতে",
+    "add_admin <ইউজার_আইডি>": "আপনার অন্য টেলিগ্রাম আইডিকে অ্যাডমিন বানাতে",
+    "del_admin <ইউজার_আইডি>": "অ্যাডমিন লিস্ট থেকে কোনো আইডি সরাতে",
+    "admins": "বর্তমানে অনুমোদিত সব অ্যাডমিনের লিস্ট দেখতে"
 }
 
-# ডাটাবেজ থেকে সেটিংস পাওয়া
+MIRROR_CACHE = {
+    "target": None,
+    "sources": [],
+    "caption": "🎬 Join our channel for more movies!",
+    "active": True,
+    "admins": []
+}
+
 async def get_mirror_config():
+    global MIRROR_CACHE
     if db is not None:
-        doc = await db.settings.find_one({"_id": "mirror_config"})
-        if doc:
-            return doc
-    return {"target": None, "sources": [], "caption": "\n\n🎬 Join our channel for more movies!", "active": True}
+        try:
+            doc = await asyncio.wait_for(db.settings.find_one({"_id": "mirror_config"}), timeout=5)
+            if doc:
+                MIRROR_CACHE = doc
+                return doc
+        except Exception:
+            pass
+    return MIRROR_CACHE
 
 async def save_mirror_config(config):
+    global MIRROR_CACHE
+    MIRROR_CACHE = config
     if db is not None:
-        await db.settings.update_one({"_id": "mirror_config"}, {"$set": config}, upsert=True)
+        try:
+            await db.settings.update_one({"_id": "mirror_config"}, {"$set": config}, upsert=True)
+        except Exception:
+            pass
 
-# ক্যাপশন থেকে প্রতিদ্বন্দ্বীর লিংক ও নাম মুছে ফেলার স্মার্ট ক্লিনার
 def clean_and_format_caption(old_caption, custom_footer):
     if not old_caption:
         return custom_footer.strip()
-
-    # প্রতিদ্বন্দ্বীর সব @username মুছে ফেলা
     text = re.sub(r'@\w+', '', old_caption)
-
-    # প্রতিদ্বন্দ্বীর সব t.me লিংক মুছে ফেলা
     text = re.sub(r'https?://t\.me/[^\s]+', '', text)
-
-    # অতিরিক্ত ফাঁকা লাইন ঠিক করা
     text = re.sub(r'\n\s*\n', '\n', text).strip()
-
-    # আপনার নিজস্ব সিগনেচার যুক্ত করা
     return f"{text}\n\n{custom_footer.strip()}"
+
+# 🔥 মাল্টি-অ্যাডমিন ভেরিফায়ার (মাস্টার ওনার বা যেকোনো অনুমোদিত অ্যাডমিন) 🔥
+async def is_authorized_admin(message: Message):
+    user_id = message.from_user.id
+    if user_id == OWNER_ID:
+        return True
+
+    config = await get_mirror_config()
+    allowed_admins = config.get("admins", [])
+    if user_id in allowed_admins:
+        return True
+
+    await message.reply_text(
+        f"❌ **অনুমতি নেই!**\n\n"
+        f"👤 আপনার টেলিগ্রাম আইডি: `{user_id}`\n\n"
+        f"💡 _এই আইডিটিকে অ্যাডমিন বানাতে আপনার মূল একাউন্ট থেকে লিখুন:_ `/add_admin {user_id}`"
+    )
+    return False
 
 
 # ==============================================================================
-# 🛠️ কন্ট্রোল প্যানেল কমান্ডসমূহ (শুধুমাত্র বটের মালিকের জন্য)
+# 👑 অ্যাডমিন ম্যানেজমেন্ট কমান্ডসমূহ
+# ==============================================================================
+
+@Client.on_message(filters.command("add_admin") & filters.private)
+async def add_new_admin(client: Client, message: Message):
+    # শুধু মাস্টার ওনার নতুন অ্যাডমিন যোগ করতে পারবে
+    if message.from_user.id != OWNER_ID:
+        await message.reply_text("❌ শুধুমাত্র বটের মূল মালিক নতুন অ্যাডমিন যুক্ত করতে পারবেন!")
+        return
+
+    if len(message.command) < 2:
+        await message.reply_text("⚠️ **নিয়ম:** `/add_admin আপনার_অন্য_আইডি`\n(যেমন: `/add_admin 1234567890`)")
+        return
+
+    try:
+        new_id = int(message.command[1].strip())
+        config = await get_mirror_config()
+        admins = config.get("admins", [])
+        if new_id not in admins:
+            admins.append(new_id)
+            config["admins"] = admins
+            await save_mirror_config(config)
+            await message.reply_text(f"🎉 **সফল হয়েছে!**\nআইডি `{new_id}` এখন বটের ফুল অ্যাডমিন হিসেবে যুক্ত হয়েছে।")
+        else:
+            await message.reply_text("⚠️ এই আইডিটি অলরেডি অ্যাডমিন লিস্টে আছে!")
+    except ValueError:
+        await message.reply_text("❌ আইডি অবশ্যই সংখ্যায় হতে হবে!")
+
+@Client.on_message(filters.command("del_admin") & filters.private)
+async def remove_admin(client: Client, message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+
+    if len(message.command) < 2:
+        await message.reply_text("⚠️ **নিয়ম:** `/del_admin আইডি`")
+        return
+
+    try:
+        del_id = int(message.command[1].strip())
+        config = await get_mirror_config()
+        admins = config.get("admins", [])
+        if del_id in admins:
+            admins.remove(del_id)
+            config["admins"] = admins
+            await save_mirror_config(config)
+            await message.reply_text(f"🗑 **অ্যাডমিন সরানো হয়েছে:** `{del_id}`")
+        else:
+            await message.reply_text("❌ এই আইডিটি অ্যাডমিন লিস্টে নেই!")
+    except ValueError:
+        pass
+
+@Client.on_message(filters.command("admins") & filters.private)
+async def list_admins(client: Client, message: Message):
+    if not await is_authorized_admin(message):
+        return
+
+    config = await get_mirror_config()
+    admins = config.get("admins", [])
+    admins_text = "\n".join([f"• `{a}`" for a in admins]) if admins else "কোনো অতিরিক্ত অ্যাডমিন নেই।"
+
+    await message.reply_text(
+        f"👑 **বটের অনুমোদিত অ্যাডমিন লিস্ট:**\n\n"
+        f"🌟 **মাস্টার ওনার:** `{OWNER_ID}`\n\n"
+        f"👥 **অন্যান্য অনুমোদিত আইডি:**\n{admins_text}"
+    )
+
+
+# ==============================================================================
+# 🛠️ মিরর কন্ট্রোল প্যানেল (যেকোনো অ্যাডমিন আইডি থেকে ব্যবহারযোগ্য)
 # ==============================================================================
 
 @Client.on_message(filters.command("set_target") & filters.private)
 async def set_target_channel(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
+    if not await is_authorized_admin(message):
         return
 
     if len(message.command) < 2:
@@ -63,13 +160,13 @@ async def set_target_channel(client: Client, message: Message):
         config = await get_mirror_config()
         config["target"] = target_id
         await save_mirror_config(config)
-        await message.reply_text(f"✅ **টার্গেট চ্যানেল সেট হয়েছে:** `{target_id}`\nএখন এই চ্যানেলে স্বয়ংক্রিয়ভাবে পোস্ট চলে যাবে।")
+        await message.reply_text(f"✅ **টার্গেট চ্যানেল সেট হয়েছে:** `{target_id}`\n\n⚠️ _নিশ্চিত করুন এই চ্যানেলে আপনার বটটি **Admin** করা আছে!_")
     except ValueError:
         await message.reply_text("❌ চ্যানেল আইডি সংখ্যায় হতে হবে (যেমন: `-100...`)!")
 
 @Client.on_message(filters.command("add_source") & filters.private)
 async def add_source_channel(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
+    if not await is_authorized_admin(message):
         return
 
     if len(message.command) < 2:
@@ -84,7 +181,7 @@ async def add_source_channel(client: Client, message: Message):
             sources.append(source_id)
             config["sources"] = sources
             await save_mirror_config(config)
-            await message.reply_text(f"✅ **সোর্স চ্যানেল যুক্ত হয়েছে:** `{source_id}`\nএই চ্যানেলের সব নতুন পোস্ট ক্লোন করা হবে।")
+            await message.reply_text(f"✅ **সোর্স চ্যানেল যুক্ত হয়েছে:** `{source_id}`\nএখন এই চ্যানেলের সব নতুন পোস্ট ক্লোন হবে।")
         else:
             await message.reply_text("⚠️ এই চ্যানেলটি অলরেডি লিস্টে আছে!")
     except ValueError:
@@ -92,7 +189,7 @@ async def add_source_channel(client: Client, message: Message):
 
 @Client.on_message(filters.command("del_source") & filters.private)
 async def delete_source_channel(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
+    if not await is_authorized_admin(message):
         return
 
     if len(message.command) < 2:
@@ -115,22 +212,22 @@ async def delete_source_channel(client: Client, message: Message):
 
 @Client.on_message(filters.command("set_caption") & filters.private)
 async def set_custom_caption(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
+    if not await is_authorized_admin(message):
         return
 
     if len(message.command) < 2:
-        await message.reply_text("⚠️ **নিয়ম:** `/set_caption আপনার_ক্যাপশন`\n(যেমন: `/set_caption Join: @MyChannel\nWebsite: https://mysite.com`)")
+        await message.reply_text("⚠️ **নিয়ম:** `/set_caption আপনার_ক্যাপশন_লেখা`")
         return
 
     custom_text = message.text.split(None, 1)[1].strip()
     config = await get_mirror_config()
     config["caption"] = custom_text
     await save_mirror_config(config)
-    await message.reply_text(f"✅ **কাস্টম ক্যাপশন সেভ হয়েছে:**\n\n{custom_text}")
+    await message.reply_text(f"✅ **কাস্টম ক্যাপশন সেভ হয়েছে:**\n\n`{custom_text}`")
 
 @Client.on_message(filters.command("mirror_toggle") & filters.private)
 async def toggle_mirror_system(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
+    if not await is_authorized_admin(message):
         return
 
     config = await get_mirror_config()
@@ -141,7 +238,7 @@ async def toggle_mirror_system(client: Client, message: Message):
 
 @Client.on_message(filters.command("mirror_status") & filters.private)
 async def show_mirror_status(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
+    if not await is_authorized_admin(message):
         return
 
     config = await get_mirror_config()
@@ -155,36 +252,32 @@ async def show_mirror_status(client: Client, message: Message):
         f"⚙️ **অবস্থা:** {status}\n"
         f"🎯 **টার্গেট চ্যানেল (যেখানে পোস্ট যাবে):** `{target}`\n\n"
         f"📡 **সোর্স চ্যানেলসমূহ (যেখান থেকে কপি হবে):**\n{sources_text}\n\n"
-        f"📝 **আপনার কাস্টম সিগনেচার:**\n`{config.get('caption')}`"
+        f"📝 **আপনার কাস্টম ক্যাপশন:**\n`{config.get('caption')}`"
     )
     await message.reply_text(text)
 
 
 # ==============================================================================
-# 🚀 ক্লাউড টু ক্লাউড লাইভ অটো-কপি ইঞ্জিন (জিরো ব্যান্ডউইথ)
+# 🚀 ক্লাউড টু ক্লাউড লাইভ অটো-কপি ইঞ্জিন (০ এমবি ব্যান্ডউইথ)
 # ==============================================================================
 
 @Client.on_message(filters.channel | filters.group, group=10)
 async def auto_mirror_engine(client: Client, message: Message):
     config = await get_mirror_config()
 
-    # যদি সিস্টেম বন্ধ থাকে বা টার্গেট সেট না থাকে
     if not config.get("active", True) or not config.get("target"):
         return
 
-    # মেসেজটি কি আমাদের ট্র্যাক করা কোনো সোর্স চ্যানেল থেকে এসেছে?
     if message.chat.id not in config.get("sources", []):
         return
 
     target_chat = config["target"]
     custom_footer = config.get("caption", "")
 
-    # ক্যাপশন ক্লিন ও নিজের ক্যাপশন যুক্ত করা
     raw_caption = message.caption or message.text or ""
     new_caption = clean_and_format_caption(raw_caption, custom_footer)
 
     try:
-        # 🔥 টেলিগ্রামের নিজস্ব ক্লাউড কপি (০ এমবি সার্ভার ডাটা খরচ, ০.২ সেকেন্ড সময়) 🔥
         await client.copy_message(
             chat_id=target_chat,
             from_chat_id=message.chat.id,
@@ -192,7 +285,6 @@ async def auto_mirror_engine(client: Client, message: Message):
             caption=new_caption if message.caption else None
         )
 
-        # যদি শুধুই টেক্সট মেসেজ হয়
         if message.text and not message.media:
             await client.send_message(chat_id=target_chat, text=new_caption)
 
