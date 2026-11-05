@@ -1,18 +1,17 @@
 # plugins/downloader.py
 import os
-import re
 import time
-import struct
 import asyncio
 import uuid
 import aiohttp
-import subprocess
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from hachoir.metadata import extractMetadata
+from hachoir.parser import createParser
 import yt_dlp
 
 HELP = {
-    "dl <লিংক>": "ইন্টারেক্টিভ প্যানেল সহ ভিডিও ডাউনলোড, রিনেম ও থাম্বনেইল সেট করে আপলোড"
+    "dl <লিংক>": "ইন্টারেক্টিভ প্যানেল সহ ভিডিও ডাউনলোড, রিনেম ও সঠিক সময়কাল সহ আপলোড"
 }
 
 TASKS = {}
@@ -27,14 +26,18 @@ def humanbytes(size):
         size /= 1024.0
     return f"{size:.2f} {unit}"
 
-def format_duration(seconds):
+# 🔥 আপনার আগের বটের টাইম ফরম্যাটার 🔥
+def time_formatter(seconds):
     if not seconds or seconds <= 0:
         return "00:00"
-    mins, secs = divmod(int(seconds), 60)
-    hours, mins = divmod(mins, 60)
-    if hours > 0:
-        return f"{hours:02d}:{mins:02d}:{secs:02d} ঘণ্টা"
-    return f"{mins:02d}:{secs:02d} মিনিট"
+    minutes, seconds = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    elif minutes:
+        return f"{minutes}m {seconds}s"
+    else:
+        return f"{seconds}s"
 
 def get_progress_bar(current, total):
     percentage = (current / total) * 100 if total > 0 else 0
@@ -42,59 +45,19 @@ def get_progress_bar(current, total):
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] {percentage:.1f}%"
 
-
-# 🔥 কোনো ffprobe ছাড়া সরাসরি পাইথন দিয়ে MP4 মেমোরি থেকে নিখুঁত সময় বের করার ইঞ্জিন 🔥
+# 🔥 আপনার আগের বটের সেই আসল Hachoir ডিউরেশন ইঞ্জিন 🔥
 def get_exact_duration(file_path):
-    if not file_path or not os.path.exists(file_path):
-        return 0
-
-    # ১. নেটিভ পাইথন MP4 হেডার রিডার (১০০% কাজ করবে ffprobe ছাড়া)
     try:
-        file_size = os.path.getsize(file_path)
-        with open(file_path, "rb") as f:
-            # ফাইলের শুরুর ৫ মেগাবাইট স্ক্যান করা
-            chunk = f.read(min(file_size, 5 * 1024 * 1024))
-            pos = chunk.find(b"mvhd")
-
-            # শুরুতে না পেলে শেষের ৫ মেগাবাইট স্ক্যান করা
-            if pos == -1 and file_size > 5 * 1024 * 1024:
-                f.seek(file_size - (5 * 1024 * 1024))
-                chunk = f.read(5 * 1024 * 1024)
-                pos = chunk.find(b"mvhd")
-
-            if pos != -1:
-                pos += 4  # skip 'mvhd'
-                version = chunk[pos]
-                pos += 4  # skip version + flags
-                if version == 1:
-                    pos += 16  # skip 64-bit creation & mod time
-                    timescale, duration = struct.unpack(">IQ", chunk[pos:pos+12])
-                else:
-                    pos += 8   # skip 32-bit creation & mod time
-                    timescale, duration = struct.unpack(">II", chunk[pos:pos+8])
-
-                if timescale > 0 and duration > 0:
-                    calculated_dur = duration / timescale
-                    if calculated_dur > 0:
-                        return calculated_dur
+        parser = createParser(file_path)
+        if not parser:
+            return 0
+        with parser:
+            metadata = extractMetadata(parser)
+            if metadata and metadata.has("duration"):
+                return metadata.get("duration").seconds
     except Exception as e:
-        print(f"[Native Duration Parse Error]: {e}")
-
-    # ২. ব্যাকআপ হিসেবে ffprobe চেক (যদি কখনো সার্ভারে থাকে)
-    try:
-        cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", file_path
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        out = res.stdout.strip()
-        if out and out != "N/A":
-            return float(out)
-    except Exception:
-        pass
-
+        print(f"[Hachoir Duration Error]: {e}")
     return 0
-
 
 def run_yt_dlp(url: str, download_path: str, progress_hook):
     ydl_opts = {
@@ -155,7 +118,7 @@ async def media_downloader(client: Client, message: Message):
         loop = asyncio.get_running_loop()
         file_path, title, duration = await loop.run_in_executor(None, run_yt_dlp, url, temp_template, progress_hook)
         
-        # 🔥 সরাসরি ফাইল থেকে আসল সময় বের করা 🔥
+        # 🔥 Hachoir ইঞ্জিন দিয়ে আসল সময় বের করা 🔥
         exact_dur = get_exact_duration(file_path)
         if exact_dur > 0:
             duration = exact_dur
@@ -185,7 +148,7 @@ async def media_downloader(client: Client, message: Message):
         caption = (
             f"✅ **ডাউনলোড সম্পন্ন হয়েছে!**\n\n"
             f"🎬 **নাম:** `{title}`\n"
-            f"⏱ **সময়কাল:** `{format_duration(duration)}`\n"
+            f"⏱ **সময়কাল:** `{time_formatter(duration)}`\n"
             f"💾 **সাইজ:** `{humanbytes(filesize)}`\n"
             f"🖼 **থাম্বনেইল:** `ডিফল্ট`\n\n"
             f"👇 _নিচের বাটন চেপে নাম ও থাম্বনেইল পরিবর্তন করে **Done** চাপুন:_"
@@ -244,7 +207,7 @@ async def button_handler(client: Client, query: CallbackQuery):
                 last_edit = now
 
         try:
-            # 🔥 আপলোডের ঠিক আগে আবার কনফার্ম করা 🔥
+            # আপলোডের ঠিক আগে Hachoir দিয়ে আবার সময় রি-চেক করা
             exact_dur = get_exact_duration(task["file_path"])
             if exact_dur > 0:
                 task["duration"] = exact_dur
@@ -253,12 +216,12 @@ async def button_handler(client: Client, query: CallbackQuery):
 
             caption = (
                 f"🎬 **শিরোনাম:** `{task['title']}`\n"
-                f"⏱ **সময়কাল:** `{format_duration(duration_secs)}`\n"
+                f"⏱ **সময়কাল:** `{time_formatter(duration_secs)}`\n"
                 f"💾 **সাইজ:** `{humanbytes(task['filesize'])}`\n\n"
                 f"🤖 Powered by **OmniCore**"
             )
 
-            # টেলিগ্রামের প্লেয়ারে সঠিক duration_secs পাঠিয়ে দেওয়া
+            # টেলিগ্রামের প্লেয়ারে আসল duration_secs পাঠানো
             await query.message.reply_video(
                 video=task["file_path"],
                 caption=caption,
@@ -303,7 +266,6 @@ async def input_listener(client: Client, message: Message):
         task["file_path"] = new_path
         task["title"] = new_name
 
-        # রিনেম করার পর নতুন ফাইল থেকে সময় আপডেট করা
         exact_dur = get_exact_duration(new_path)
         if exact_dur > 0:
             task["duration"] = exact_dur
