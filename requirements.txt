@@ -4,3 +4,4 @@ aiohttp
 yt-dlp
 motor
 dnspython
+hachoir
