@@ -66,7 +66,7 @@ def get_exact_duration(file_path):
 
 
 # ==============================================================================
-# 🌐 গ্লোবাল মাল্টি-ল্যাঙ্গুয়েজ মুভি সার্চ ইঞ্জিন (হলিউড, বলিউড, সাউথ ও বাংলা)
+# 🌐 গ্লোবাল ক্লাউড প্রক্সি মুভি সার্চ ইঞ্জিন (DNS ব্লক ও সেশন ক্র্যাশ প্রুফ)
 # ==============================================================================
 
 async def search_global_web_movies(query: str):
@@ -74,20 +74,21 @@ async def search_global_web_movies(query: str):
     clean_query = query.strip()
     encoded_query = urllib.parse.quote(clean_query)
 
-    # 🔥 ১. অল-অরিজিন্স ক্লাউড প্রক্সি দিয়ে গ্লোবাল YTS ডাটাবেজ সার্চ (Koyeb DNS ব্লক বাইপাস) 🔥
+    # 🔥 ইঞ্জিন ১: AllOrigins ক্লাউড প্রক্সি দিয়ে YTS মুভি স্ক্র্যাপ (Koyeb DNS বাইপাস) 🔥
     try:
-        raw_yts = f"https://yts.mx/api/v2/list_movies.json?query_term={encoded_query}&limit=6"
-        proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(raw_yts)}"
+        raw_api = f"https://yts.mx/api/v2/list_movies.json?query_term={encoded_query}&limit=6"
+        proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(raw_api)}"
 
         timeout = aiohttp.ClientTimeout(total=15)
+        # ফ্রেশ সেশন ব্যবহার (কোনো সেশন ক্লোজড এরর হবে না)
         async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as session:
             async with session.get(proxy_url) as resp:
                 if resp.status == 200:
-                    proxy_json = await resp.json()
-                    content_str = proxy_json.get("contents")
-                    if content_str:
-                        yts_data = json.loads(content_str)
-                        movies = yts_data.get("data", {}).get("movies", [])
+                    json_data = await resp.json()
+                    raw_content = json_data.get("contents")
+                    if raw_content:
+                        yts_res = json.loads(raw_content)
+                        movies = yts_res.get("data", {}).get("movies", [])
                         for m in movies:
                             title = m.get("title_long") or m.get("title")
                             year = m.get("year", "N/A")
@@ -109,11 +110,10 @@ async def search_global_web_movies(query: str):
                                     "download_url": webtor_url
                                 })
     except Exception as e:
-        print(f"[YTS Proxy Search Error]: {e}")
+        print(f"[Engine 1 Proxy Error]: {e}")
 
-    # 🔥 ২. ভারতীয়, সাউথ (RRR, KGF) ও বাংলা মুভির জন্য গ্লোবাল ক্লাউড ট্র্যাকার 🔥
+    # 🔥 ইঞ্জিন ২: ভারতীয়, সাউথ (RRR, KGF) ও বাংলা মুভির জন্য Vercel ক্লাউড ট্র্যাকার 🔥
     try:
-        # ক্লাউডফ্লেয়ার ওয়ার্কার এপিআই যা যেকোনো ওপেন মুভি ট্র্যাক করে
         torrent_api = f"https://torrent-api-py-hazel.vercel.app/api/v1/all/search?query={encoded_query}"
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as session:
@@ -125,8 +125,7 @@ async def search_global_web_movies(query: str):
                             title = item.get("name") or clean_query
                             size = item.get("size", "1.4 GB")
                             magnet = item.get("magnet")
-                            
-                            # হ্যাশ বের করা
+
                             hash_match = re.search(r"urn:btih:([a-fA-F0-9]+)", magnet) if magnet else None
                             if hash_match:
                                 tor_hash = hash_match.group(1)
@@ -142,7 +141,7 @@ async def search_global_web_movies(query: str):
                                     "download_url": webtor_url
                                 })
     except Exception as e:
-        print(f"[Multi-Lang Movie Search Error]: {e}")
+        print(f"[Engine 2 Multi-Lang Error]: {e}")
 
     return results
 
@@ -166,7 +165,7 @@ async def web_movie_search_command(client: Client, message: Message):
         return
 
     query = message.text.split(None, 1)[1].strip()
-    status_msg = await message.reply_text(f"⚡ **সারা ইন্টারনেটের গ্লোবাল সার্ভার স্ক্যান করা হচ্ছে: '{query}'...**")
+    status_msg = await message.reply_text(f"⚡ **ক্লাউড প্রক্সি দিয়ে ইন্টারনেটের মুভি সার্ভার স্ক্যান করা হচ্ছে: '{query}'...**")
 
     results = await search_global_web_movies(query)
 
@@ -174,6 +173,8 @@ async def web_movie_search_command(client: Client, message: Message):
         try:
             await status_msg.edit_text(f"❌ দুঃখিত! ইন্টারনেটের কোনো সার্ভারে **'{query}'**-এর সরাসরি ফাইল পাওয়া যায়নি। নামের বানান সঠিক কিনা যাচাই করুন।")
         except errors.MessageNotModified:
+            pass
+        except Exception:
             pass
         return
 
@@ -199,6 +200,8 @@ async def web_movie_search_command(client: Client, message: Message):
         await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
     except errors.MessageNotModified:
         pass
+    except Exception as e:
+        print(f"[Edit UI Error]: {e}")
 
 
 # ==============================================================================
@@ -309,6 +312,7 @@ async def web_download_callback(client: Client, query: CallbackQuery):
             duration=int(duration_secs),
             progress=upload_progress
         )
+
         await status_msg.delete()
 
     except Exception as e:
