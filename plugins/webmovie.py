@@ -1,11 +1,13 @@
 # plugins/webmovie.py
 import os
+import re
 import time
+import json
 import uuid
 import asyncio
 import urllib.parse
 import aiohttp
-from pyrogram import Client, filters
+from pyrogram import Client, filters, errors
 from pyrogram.enums import ParseMode
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from hachoir.metadata import extractMetadata
@@ -64,63 +66,83 @@ def get_exact_duration(file_path):
 
 
 # ==============================================================================
-# 🌐 গ্লোবাল মুভি সার্চ ইঞ্জিন (ক্লাউডফ্লেয়ার ও আইপি বাইপাস সহ)
+# 🌐 গ্লোবাল মাল্টি-ল্যাঙ্গুয়েজ মুভি সার্চ ইঞ্জিন (হলিউড, বলিউড, সাউথ ও বাংলা)
 # ==============================================================================
 
 async def search_global_web_movies(query: str):
     results = []
-    encoded_query = urllib.parse.quote(query)
+    clean_query = query.strip()
+    encoded_query = urllib.parse.quote(clean_query)
 
-    # ট্রাই করার মিরর লিস্ট
-    raw_target_url = f"https://yts.mx/api/v2/list_movies.json?query_term={encoded_query}&limit=6"
-    
-    # Koyeb আইপি ব্লক এড়াতে প্রক্সি ও ডিরেক্ট ইউআরএল পুল
-    urls_to_try = [
-        raw_target_url,
-        f"https://yts.am/api/v2/list_movies.json?query_term={encoded_query}&limit=6",
-        f"https://api.allorigins.win/raw?url={urllib.parse.quote(raw_target_url)}"
-    ]
+    # 🔥 ১. অল-অরিজিন্স ক্লাউড প্রক্সি দিয়ে গ্লোবাল YTS ডাটাবেজ সার্চ (Koyeb DNS ব্লক বাইপাস) 🔥
+    try:
+        raw_yts = f"https://yts.mx/api/v2/list_movies.json?query_term={encoded_query}&limit=6"
+        proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(raw_yts)}"
 
-    # SSL ভেরিফিকেশন ড্রপ কানেক্টর (যাতে হ্যান্ডশেক এরর না আসে)
-    connector = aiohttp.TCPConnector(ssl=False)
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as session:
+            async with session.get(proxy_url) as resp:
+                if resp.status == 200:
+                    proxy_json = await resp.json()
+                    content_str = proxy_json.get("contents")
+                    if content_str:
+                        yts_data = json.loads(content_str)
+                        movies = yts_data.get("data", {}).get("movies", [])
+                        for m in movies:
+                            title = m.get("title_long") or m.get("title")
+                            year = m.get("year", "N/A")
+                            rating = m.get("rating", "N/A")
 
-    for target_url in urls_to_try:
-        try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(headers=HEADERS, connector=connector, timeout=timeout) as session:
-                async with session.get(target_url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        movies = data.get("data", {}).get("movies", [])
-                        if movies:
-                            for m in movies:
-                                title = m.get("title_long") or m.get("title")
-                                year = m.get("year", "N/A")
-                                rating = m.get("rating", "N/A")
+                            for tor in m.get("torrents", []):
+                                quality = tor.get("quality", "HD")
+                                tor_hash = tor.get("hash")
+                                size = tor.get("size", "N/A")
 
-                                for tor in m.get("torrents", []):
-                                    quality = tor.get("quality", "HD")
-                                    tor_hash = tor.get("hash")
-                                    size = tor.get("size", "N/A")
+                                webtor_url = f"https://api.webtor.io/torrent/{tor_hash}/stream"
+                                results.append({
+                                    "id": str(uuid.uuid4())[:8],
+                                    "title": f"{title} ({quality})",
+                                    "year": year,
+                                    "quality": quality,
+                                    "size": size,
+                                    "rating": f"⭐ {rating}/10",
+                                    "download_url": webtor_url
+                                })
+    except Exception as e:
+        print(f"[YTS Proxy Search Error]: {e}")
 
-                                    # ক্লাউড ডিরেক্ট ডাউনলোড লিংক
-                                    webtor_url = f"https://api.webtor.io/torrent/{tor_hash}/stream"
+    # 🔥 ২. ভারতীয়, সাউথ (RRR, KGF) ও বাংলা মুভির জন্য গ্লোবাল ক্লাউড ট্র্যাকার 🔥
+    try:
+        # ক্লাউডফ্লেয়ার ওয়ার্কার এপিআই যা যেকোনো ওপেন মুভি ট্র্যাক করে
+        torrent_api = f"https://torrent-api-py-hazel.vercel.app/api/v1/all/search?query={encoded_query}"
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as session:
+            async with session.get(torrent_api) as resp:
+                if resp.status == 200:
+                    tor_list = await resp.json()
+                    if isinstance(tor_list, list):
+                        for item in tor_list[:6]:
+                            title = item.get("name") or clean_query
+                            size = item.get("size", "1.4 GB")
+                            magnet = item.get("magnet")
+                            
+                            # হ্যাশ বের করা
+                            hash_match = re.search(r"urn:btih:([a-fA-F0-9]+)", magnet) if magnet else None
+                            if hash_match:
+                                tor_hash = hash_match.group(1)
+                                webtor_url = f"https://api.webtor.io/torrent/{tor_hash}/stream"
 
-                                    results.append({
-                                        "id": str(uuid.uuid4())[:8],
-                                        "title": f"{title} ({quality})",
-                                        "year": year,
-                                        "quality": quality,
-                                        "size": size,
-                                        "rating": f"⭐ {rating}/10",
-                                        "download_url": webtor_url,
-                                        "hash": tor_hash
-                                    })
-                            if results:
-                                break
-        except Exception as e:
-            print(f"[Movie API Error]: {e}")
-            continue
+                                results.append({
+                                    "id": str(uuid.uuid4())[:8],
+                                    "title": title[:50],
+                                    "year": "HD Release",
+                                    "quality": "WEB-DL",
+                                    "size": size,
+                                    "rating": "⭐ Popular",
+                                    "download_url": webtor_url
+                                })
+    except Exception as e:
+        print(f"[Multi-Lang Movie Search Error]: {e}")
 
     return results
 
@@ -137,19 +159,22 @@ async def web_movie_search_command(client: Client, message: Message):
             "`/webfind মুভির_নাম` অথবা `/movie মুভির_নাম`\n\n"
             "যেমন:\n"
             "• `/webfind Oppenheimer`\n"
-            "• `/movie Avatar The Way of Water`\n"
-            "• `/webfind Interstellar`\n"
-            "• `/movie Spider-Man`"
+            "• `/movie RRR`\n"
+            "• `/movie KGF`\n"
+            "• `/webfind Avatar`"
         )
         return
 
     query = message.text.split(None, 1)[1].strip()
-    status_msg = await message.reply_text(f"⚡ **সারা ইন্টারনেটের বিশ্বস্ত মুভি হাব স্ক্যান করা হচ্ছে: '{query}'...**")
+    status_msg = await message.reply_text(f"⚡ **সারা ইন্টারনেটের গ্লোবাল সার্ভার স্ক্যান করা হচ্ছে: '{query}'...**")
 
     results = await search_global_web_movies(query)
 
     if not results:
-        await status_msg.edit_text(f"❌ দুঃখিত! ইন্টারনেটের কোনো সার্ভারে **'{query}'**-এর সরাসরি ফাইল খুঁজে পাওয়া যায়নি। সঠিক ইংরেজি নাম দিয়ে চেষ্টা করুন।")
+        try:
+            await status_msg.edit_text(f"❌ দুঃখিত! ইন্টারনেটের কোনো সার্ভারে **'{query}'**-এর সরাসরি ফাইল পাওয়া যায়নি। নামের বানান সঠিক কিনা যাচাই করুন।")
+        except errors.MessageNotModified:
+            pass
         return
 
     search_id = str(uuid.uuid4())[:8]
@@ -170,7 +195,10 @@ async def web_movie_search_command(client: Client, message: Message):
             InlineKeyboardButton(f"⬇️ {idx} নম্বর মুভিটি ডাউনলোড করে টেলিগ্রামে দিন", callback_data=f"webdl_{search_id}_{item['id']}")
         ])
 
-    await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    try:
+        await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    except errors.MessageNotModified:
+        pass
 
 
 # ==============================================================================
@@ -206,7 +234,6 @@ async def web_download_callback(client: Client, query: CallbackQuery):
         timeout = aiohttp.ClientTimeout(total=3600)
         connector = aiohttp.TCPConnector(ssl=False)
 
-        # ১. ইন্টারনেটের ওয়েবসাইট থেকে ডাউনলোড করা
         async with aiohttp.ClientSession(headers=HEADERS, connector=connector, timeout=timeout) as session:
             async with session.get(download_url) as resp:
                 if resp.status not in [200, 206]:
@@ -242,7 +269,6 @@ async def web_download_callback(client: Client, query: CallbackQuery):
                                 pass
                             last_edit = now
 
-        # ২. ডাউনলোড সম্পন্ন, এখন টেলিগ্রামে আপলোড
         await status_msg.edit_text("📤 **ডাউনলোড শেষ! টেলিগ্রামে আসল ভিডিও ফাইল পাঠানো হচ্ছে...**")
 
         upload_start = time.time()
@@ -277,14 +303,12 @@ async def web_download_callback(client: Client, query: CallbackQuery):
             f"🤖 Downloaded from Open Web via **OmniCore**"
         )
 
-        # ৩. টেলিগ্রামের নিজস্ব প্লেয়ারে ভিডিও সেন্ড করা
         await query.message.reply_video(
             video=temp_file,
             caption=caption,
             duration=int(duration_secs),
             progress=upload_progress
         )
-
         await status_msg.delete()
 
     except Exception as e:
