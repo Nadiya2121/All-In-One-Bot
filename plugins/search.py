@@ -1,19 +1,21 @@
 # plugins/search.py
 import os
+import re
 import uuid
 import asyncio
 from pyrogram import Client, filters, enums, errors
+from pyrogram.raw.functions.contacts import Search as RawSearch
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from config import API_ID, API_HASH
 
 HELP = {
-    "search <নাম>": "সারা টেলিগ্রাম নেটওয়ার্ক সার্চ করে যেকোনো ভিডিও বা ফাইল সরাসরি ইনবক্সে পেতে",
-    "find <নাম>": "সরাসরি ফাইল খুঁজে পাওয়ার শর্টকাট কমান্ড"
+    "search <নাম>": "সারা টেলিগ্রামের অচেনা চ্যানেল থেকে যেকোনো মুভি/ফাইল সরাসরি বটের ভেতর পেতে",
+    "find <নাম>": "সরাসরি গ্লোবাল ফাইল সার্চের শর্টকাট"
 }
 
 SESSION_FILE = "downloads/user_session.txt"
-SEARCH_RESULTS = {}
-user_search_client = None
+SEARCH_CACHE = {}
+user_spy_search = None
 
 def humanbytes(size):
     if not size:
@@ -25,7 +27,7 @@ def humanbytes(size):
     return f"{size:.2f} {unit}"
 
 def format_duration(seconds):
-    if not seconds:
+    if not seconds or seconds <= 0:
         return "N/A"
     mins, secs = divmod(int(seconds), 60)
     hours, mins = divmod(mins, 60)
@@ -33,196 +35,243 @@ def format_duration(seconds):
         return f"{hours:02d}:{mins:02d}:{secs:02d} ঘণ্টা"
     return f"{mins:02d}:{secs:02d} মিনিট"
 
-# লগইন করা একাউন্ট দিয়ে গ্লোবাল সার্চ ক্লায়েন্ট তৈরি
-async def get_search_client():
-    global user_search_client
-    if user_search_client and user_search_client.is_connected:
-        return user_search_client
+# অদৃশ্য ব্যাকগ্রাউন্ড ইউজারবট ক্লায়েন্ট চালু করা
+async def get_spy_search_client():
+    global user_spy_search
+    if user_spy_search and user_spy_search.is_connected:
+        return user_spy_search
 
     if os.path.exists(SESSION_FILE):
-        with open(SESSION_FILE, "r") as f:
-            session_str = f.read().strip()
-        if session_str:
-            try:
-                user_search_client = Client(
-                    "GlobalSearchSession",
+        try:
+            with open(SESSION_FILE, "r") as f:
+                session_str = f.read().strip()
+            if session_str:
+                user_spy_search = Client(
+                    "GlobalDeepSearchSession",
                     api_id=API_ID,
                     api_hash=API_HASH,
                     session_string=session_str,
                     in_memory=True
                 )
-                await user_search_client.start()
-                return user_search_client
-            except Exception as e:
-                print(f"[Search Client Error]: {e}")
+                await user_spy_search.start()
+                return user_spy_search
+        except Exception as e:
+            print(f"[Search Engine Init Error]: {e}")
     return None
 
 
-# ----------------- [ ১. গ্লোবাল সার্চ কমান্ড হ্যান্ডলার ] -----------------
+# ==============================================================================
+# 🔍 ডিপ এক্সটার্নাল সার্চ ইঞ্জিন (সারা টেলিগ্রামের বাইরের চ্যানেল স্ক্যানার)
+# ==============================================================================
+
+async def deep_telegram_crawler(u_cli: Client, query: str):
+    found_items = []
+    seen_hashes = set()
+
+    # ১. প্রথম লেয়ার: সারা টেলিগ্রামের পাবলিক গ্লোবাল ভিডিও ও ডকুমেন্ট স্ক্যান
+    try:
+        async for msg in u_cli.search_global(query=query, filter=enums.MessagesFilter.VIDEO, limit=12):
+            if msg.video and msg.video.file_name:
+                h = f"{msg.video.file_name}_{msg.video.file_size}"
+                if h not in seen_hashes:
+                    seen_hashes.add(h)
+                    found_items.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "🎬 ভিডিও (Video)",
+                        "title": msg.video.file_name[:45],
+                        "size": humanbytes(msg.video.file_size),
+                        "duration": format_duration(msg.video.duration),
+                        "chat_id": msg.chat.id,
+                        "msg_id": msg.id
+                    })
+    except Exception:
+        pass
+
+    try:
+        async for msg in u_cli.search_global(query=query, filter=enums.MessagesFilter.DOCUMENT, limit=12):
+            if msg.document and msg.document.file_name:
+                h = f"{msg.document.file_name}_{msg.document.file_size}"
+                if h not in seen_hashes:
+                    seen_hashes.add(h)
+                    found_items.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "📄 ফাইল (Document)",
+                        "title": msg.document.file_name[:45],
+                        "size": humanbytes(msg.document.file_size),
+                        "duration": "N/A",
+                        "chat_id": msg.chat.id,
+                        "msg_id": msg.id
+                    })
+    except Exception:
+        pass
+
+    # ২. দ্বিতীয় লেয়ার: ওই বিষয়ের ওপর বাইরের ৫টি বড় বড় পাবলিক চ্যানেল নিজে থেকেই খুঁজে ভেতরে স্ক্যান
+    try:
+        raw_chats = await u_cli.invoke(RawSearch(q=query, limit=5))
+        for chat in raw_chats.chats:
+            username = getattr(chat, "username", None)
+            if username:
+                try:
+                    async for ext_msg in u_cli.search_messages(chat_id=username, query=query, limit=8):
+                        media = ext_msg.video or ext_msg.document
+                        if media and getattr(media, "file_name", None):
+                            h = f"{media.file_name}_{media.file_size}"
+                            if h not in seen_hashes:
+                                seen_hashes.add(h)
+                                is_vid = bool(ext_msg.video)
+                                found_items.append({
+                                    "id": str(uuid.uuid4())[:8],
+                                    "type": "🎬 ভিডিও (Video)" if is_vid else "📄 ফাইল (Document)",
+                                    "title": media.file_name[:45],
+                                    "size": humanbytes(media.file_size),
+                                    "duration": format_duration(getattr(media, "duration", 0)) if is_vid else "N/A",
+                                    "chat_id": ext_msg.chat.id,
+                                    "msg_id": ext_msg.id
+                                })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    return found_items
+
+
+# ==============================================================================
+# 🛠️ টেলিগ্রাম কমান্ড হ্যান্ডলার
+# ==============================================================================
 
 @Client.on_message(filters.command(["search", "find"]))
-async def global_telegram_search(client: Client, message: Message):
+async def search_command_handler(client: Client, message: Message):
     if len(message.command) < 2:
         await message.reply_text(
-            "🔍 **গ্লোবাল ফাইল সার্চ ইঞ্জিন ব্যবহারের নিয়ম:**\n\n"
-            "`/search ফাইলের_নাম` অথবা `/find মুভির_নাম`\n\n"
+            "🔍 **গ্লোবাল ফাইল সার্চ ইঞ্জিনের নিয়ম:**\n\n"
+            "`/find মুভি_বা_ফাইলের_নাম`\n\n"
             "যেমন:\n"
-            "• `/search Avatar 2`\n"
-            "• `/find Python programming pdf`\n"
-            "• `/search Money Heist`"
+            "• `/find Spider-Man No Way Home`\n"
+            "• `/find Namkeen`\n"
+            "• `/find Python programming`"
         )
         return
 
     query = message.text.split(None, 1)[1].strip()
-    status_msg = await message.reply_text(f"⚡ **সারা টেলিগ্রাম নেটওয়ার্কে '{query}' খোঁজা হচ্ছে...**")
+    status_msg = await message.reply_text(f"⚡ **সারা টেলিগ্রামের উন্মুক্ত চ্যানেলগুলো থেকে '{query}' খোঁজা হচ্ছে...**")
 
-    # ইউজারবট ক্লায়েন্ট সংগ্রহ
-    u_cli = await get_search_client()
+    u_cli = await get_spy_search_client()
     if not u_cli:
-        await status_msg.edit_text(
-            "🔒 **গ্লোবাল সার্চের জন্য ইউজার সেশন প্রয়োজন!**\n\n"
-            "💡 সারা টেলিগ্রামের সব চ্যানেল স্ক্যান করার জন্য আগে বটে এসে `/login` দিয়ে আপনার যেকোনো টেলিগ্রাম আইডি লগইন করে নিন।"
-        )
+        await status_msg.edit_text("🔒 গ্লোবাল সার্চ সক্রিয় করতে আগে যেকোনো আইডি দিয়ে `/login` করে নিন।")
         return
 
-    found_items = []
-    seen_ids = set()
+    # বাইরের সব চ্যানেল ক্রল করে ফাইল আনা
+    results = await deep_telegram_crawler(u_cli, query)
 
-    try:
-        # ১. সারা টেলিগ্রামের সব পাবলিক চ্যানেলে ভিডিও সার্চ করা
-        async for msg in u_cli.search_global(query=query, filter=enums.MessagesFilter.VIDEO, limit=15):
-            if msg.video and msg.id not in seen_ids:
-                seen_ids.add(msg.id)
-                file_name = msg.video.file_name or (msg.caption.split("\n")[0] if msg.caption else "Video File")
-                found_items.append({
-                    "id": str(uuid.uuid4())[:8],
-                    "type": "🎬 ভিডিও (Video)",
-                    "title": file_name[:45],
-                    "size": humanbytes(msg.video.file_size),
-                    "duration": format_duration(msg.video.duration),
-                    "chat_id": msg.chat.id,
-                    "msg_id": msg.id
-                })
-
-        # ২. সারা টেলিগ্রামের সব পাবলিক চ্যানেলে ডকুমেন্ট/ফাইল সার্চ করা
-        async for msg in u_cli.search_global(query=query, filter=enums.MessagesFilter.DOCUMENT, limit=15):
-            if msg.document and msg.id not in seen_ids:
-                seen_ids.add(msg.id)
-                file_name = msg.document.file_name or "Document File"
-                found_items.append({
-                    "id": str(uuid.uuid4())[:8],
-                    "type": "📄 ফাইল (Document)",
-                    "title": file_name[:45],
-                    "size": humanbytes(msg.document.file_size),
-                    "duration": "N/A",
-                    "chat_id": msg.chat.id,
-                    "msg_id": msg.id
-                })
-
-    except Exception as e:
-        await status_msg.edit_text(f"❌ সার্চে সমস্যা হয়েছে: {e}")
+    if not results:
+        await status_msg.edit_text(f"❌ দুঃখিত! **'{query}'** দিয়ে সারা টেলিগ্রামের কোনো পাবলিক চ্যানেলে ফাইল পাওয়া যায়নি।")
         return
 
-    if not found_items:
-        await status_msg.edit_text(f"❌ দুঃখিত! **'{query}'** দিয়ে টেলিগ্রামে কোনো পাবলিক ভিডিও বা ফাইল পাওয়া যায়নি।")
-        return
-
-    # প্রথম ৫টি রেজাল্ট প্রদর্শন করা
-    search_session_id = str(uuid.uuid4())[:8]
-    SEARCH_RESULTS[search_session_id] = {
-        "items": found_items,
+    session_id = str(uuid.uuid4())[:8]
+    SEARCH_CACHE[session_id] = {
+        "items": results,
         "query": query,
-        "page": 0
+        "bot_id": client.me.id
     }
 
-    await show_search_page(status_msg, search_session_id, page=0)
+    await render_search_page(status_msg, session_id, page=0)
 
 
-# ----------------- [ ২. পেজিনেশন ও রেজাল্ট ডিসপ্লে ] -----------------
-
-async def show_search_page(message_to_edit, session_id: str, page: int):
-    data = SEARCH_RESULTS.get(session_id)
+async def render_search_page(status_msg, session_id: str, page: int):
+    data = SEARCH_CACHE.get(session_id)
     if not data:
         return
 
     items = data["items"]
     per_page = 4
     total_pages = (len(items) + per_page - 1) // per_page
-    start_idx = page * per_page
-    current_items = items[start_idx:start_idx + per_page]
+    start = page * per_page
+    page_items = items[start:start + per_page]
 
-    result_text = f"🔎 **'{data['query']}' এর জন্য পাওয়া ফাইলসমূহ:** (পেজ {page+1}/{total_pages})\n\n"
+    text = f"🔎 **'{data['query']}' এর জন্য পাওয়া ফাইলসমূহ:** (পেজ {page+1}/{total_pages})\n\n"
     buttons = []
 
-    for idx, item in enumerate(current_items, start=1):
-        actual_num = start_idx + idx
-        result_text += (
+    for idx, item in enumerate(page_items, start=1):
+        actual_num = start + idx
+        text += (
             f"**{actual_num}. {item['type']}**\n"
             f"📁 **নাম:** `{item['title']}`\n"
             f"💾 **সাইজ:** `{item['size']}`"
         )
         if item["duration"] != "N/A":
-            result_text += f" | ⏱ `{item['duration']}`"
-        result_text += "\n\n"
+            text += f" | ⏱ `{item['duration']}`"
+        text += "\n\n"
 
-        # ফাইল ডাউনলোড করার বাটন
         buttons.append([
-            InlineKeyboardButton(f"📥 {actual_num} নম্বর ফাইলটি ইনবক্সে নিন", callback_data=f"get_{session_id}_{item['id']}")
+            InlineKeyboardButton(f"📥 {actual_num} নম্বর ফাইলটি সরাসরি ইনবক্সে নিন", callback_data=f"dlfile_{session_id}_{item['id']}")
         ])
 
-    # নেক্সট এবং প্রিভিয়াস বাটন
-    nav_buttons = []
+    nav = []
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("◀️ আগের পেজ", callback_data=f"spage_{session_id}_{page-1}"))
+        nav.append(InlineKeyboardButton("◀️ আগের পেজ", callback_data=f"pg_{session_id}_{page-1}"))
     if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton("পরের পেজ ▶️", callback_data=f"spage_{session_id}_{page+1}"))
+        nav.append(InlineKeyboardButton("পরের পেজ ▶️", callback_data=f"pg_{session_id}_{page+1}"))
 
-    if nav_buttons:
-        buttons.append(nav_buttons)
+    if nav:
+        buttons.append(nav)
 
-    await message_to_edit.edit_text(result_text, reply_markup=InlineKeyboardMarkup(buttons))
+    await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
-# ----------------- [ ৩. বাটন ক্লিক করলে সরাসরি ফাইল ডেলিভারি ] -----------------
+# ==============================================================================
+# 🚀 ঘোস্ট ডেলিভারি (সম্পূর্ণ গোপনে বটের হাত দিয়ে ফাইল পাঠানো)
+# ==============================================================================
 
-@Client.on_callback_query(filters.regex(r"^(get_|spage_)"))
-async def search_button_actions(client: Client, query: CallbackQuery):
+@Client.on_callback_query(filters.regex(r"^(dlfile_|pg_)"))
+async def search_callback_handler(client: Client, query: CallbackQuery):
     action = query.data.split("_")[0]
 
-    # পেজ পরিবর্তন
-    if action == "spage":
+    # পেজ বদলানো
+    if action == "pg":
         session_id = query.data.split("_")[1]
         next_page = int(query.data.split("_")[2])
-        await show_search_page(query.message, session_id, next_page)
+        await render_search_page(query.message, session_id, next_page)
         await query.answer()
 
-    # ফাইল নেওয়ার বাটন চাপলে (০.৫ সেকেন্ডে সরাসরি ফাইল ডেলিভারি)
-    elif action == "get":
+    # ফাইল সরাসরি ইনবক্সে পাঠানো
+    elif action == "dlfile":
         session_id = query.data.split("_")[1]
         item_id = query.data.split("_")[2]
 
-        data = SEARCH_RESULTS.get(session_id)
+        data = SEARCH_CACHE.get(session_id)
         if not data:
-            await query.answer("❌ সেশনের মেয়াদ শেষ! আবার সার্চ করুন।", show_alert=True)
+            await query.answer("❌ সেশনের মেয়াদ শেষ হয়ে গেছে! আবার সার্চ করুন।", show_alert=True)
             return
 
-        target_item = next((i for i in data["items"] if i["id"] == item_id), None)
-        if not target_item:
+        target = next((i for i in data["items"] if i["id"] == item_id), None)
+        if not target:
             await query.answer("❌ ফাইলটি পাওয়া যায়নি!", show_alert=True)
             return
 
-        await query.answer("🚀 ফাইলটি আপনার ইনবক্সে পাঠানো হচ্ছে...", show_alert=False)
-        u_cli = await get_search_client()
+        await query.answer("🚀 ফাইলটি বটের মাধ্যমে আপনার ইনবক্সে পাঠানো হচ্ছে...", show_alert=False)
+        u_cli = await get_spy_search_client()
 
         try:
-            # 🔥 ক্লাউড টু ক্লাউড ডিরেক্ট কপি (০ এমবি সার্ভার ডাটা, কোনো চ্যানেলে জয়েন ছাড়াই) 🔥
-            await u_cli.copy_message(
+            # 🔥 ঘোস্ট রিলে: ফাইলটি আপনার অ্যাকাউন্ট থেকে নয়, সরাসরি বটের মাধ্যমে পাঠানো হবে 🔥
+            caption = f"📁 **ফাইল:** `{target['title']}`\n💾 **সাইজ:** `{target['size']}`\n\n🤖 Delivered by **OmniCore Global Engine**"
+
+            # বট সরাসরি পাবলিক চ্যানেল থেকে মেসেজ কপি করে ইউজারের চ্যাটে দেবে
+            await client.copy_message(
                 chat_id=query.from_user.id,
-                from_chat_id=target_item["chat_id"],
-                message_id=target_item["msg_id"],
-                caption=f"📁 **ফাইল:** `{target_item['title']}`\n💾 **সাইজ:** `{target_item['size']}`\n\n🤖 Powered by **OmniCore Global Search**"
+                from_chat_id=target["chat_id"],
+                message_id=target["msg_id"],
+                caption=caption
             )
-        except errors.FloodWait as f:
-            await asyncio.sleep(f.value)
-        except Exception as e:
-            await query.message.reply_text(f"❌ ফাইল ডেলিভারি ব্যর্থ হয়েছে: {e}\n(ফাইলটি প্রাইভেট চ্যানেলের বা ডিলিট করা হতে পারে)")
+
+        except Exception:
+            # যদি বট নিজে ঢুকতে না পারে, তবে ইউজারবট ফাইলটি গোপনে তুলে বটের হাত দিয়ে পাঠাবে
+            try:
+                await u_cli.copy_message(
+                    chat_id=query.from_user.id,
+                    from_chat_id=target["chat_id"],
+                    message_id=target["msg_id"],
+                    caption=f"📁 `{target['title']}`\n\n🤖 Delivered by **@TGLinkBase**"
+                )
+            except Exception as e:
+                await query.message.reply_text(f"❌ ফাইলটি সুরক্ষিত (Restricted) থাকায় সরাসরি পাঠানো যায়নি: {e}")
