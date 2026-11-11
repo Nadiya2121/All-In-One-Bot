@@ -1,5 +1,6 @@
 # plugins/downloader.py
 import os
+import shutil
 import time
 import asyncio
 import uuid
@@ -11,7 +12,7 @@ from hachoir.parser import createParser
 import yt_dlp
 
 HELP = {
-    "dl <লিংক>": "ইন্টারেক্টিভ প্যানেল সহ ভিডিও ডাউনলোড, রিনেম ও সঠিক সময়কাল সহ আপলোড"
+    "dl <লিংক>": "ইন্টারেক্টিভ প্যানেল সহ ভিডিও ডাউনলোড, ফ্রেশ রিনেম ও সঠিক সময়কাল সহ আপলোড"
 }
 
 TASKS = {}
@@ -26,7 +27,6 @@ def humanbytes(size):
         size /= 1024.0
     return f"{size:.2f} {unit}"
 
-# 🔥 আপনার আগের বটের টাইম ফরম্যাটার 🔥
 def time_formatter(seconds):
     if not seconds or seconds <= 0:
         return "00:00"
@@ -45,16 +45,14 @@ def get_progress_bar(current, total):
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] {percentage:.1f}%"
 
-# 🔥 আপনার আগের বটের সেই আসল Hachoir ডিউরেশন ইঞ্জিন 🔥
 def get_exact_duration(file_path):
     try:
         parser = createParser(file_path)
-        if not parser:
-            return 0
-        with parser:
-            metadata = extractMetadata(parser)
-            if metadata and metadata.has("duration"):
-                return metadata.get("duration").seconds
+        if parser:
+            with parser:
+                metadata = extractMetadata(parser)
+                if metadata and metadata.has("duration"):
+                    return metadata.get("duration").seconds
     except Exception as e:
         print(f"[Hachoir Duration Error]: {e}")
     return 0
@@ -89,9 +87,12 @@ async def media_downloader(client: Client, message: Message):
 
     status_msg = await message.reply_text("⚡ **ডাউনলোড শুরু হচ্ছে...**")
     
+    # 🔥 ফিক্স: ফাইলের নামের শুরুতে কোনো হিজিবিজি কোড না দিয়ে ইউনিক ফোল্ডারে রাখা হলো 🔥
     task_id = str(uuid.uuid4())[:8]
-    temp_template = f"downloads/{task_id}_%(title)s.%(ext)s"
-    os.makedirs("downloads", exist_ok=True)
+    task_folder = os.path.join("downloads", task_id)
+    os.makedirs(task_folder, exist_ok=True)
+
+    temp_template = f"{task_folder}/%(title)s.%(ext)s"
     last_edit = 0
 
     def progress_hook(d):
@@ -118,17 +119,18 @@ async def media_downloader(client: Client, message: Message):
         loop = asyncio.get_running_loop()
         file_path, title, duration = await loop.run_in_executor(None, run_yt_dlp, url, temp_template, progress_hook)
         
-        # 🔥 Hachoir ইঞ্জিন দিয়ে আসল সময় বের করা 🔥
         exact_dur = get_exact_duration(file_path)
         if exact_dur > 0:
             duration = exact_dur
 
         filesize = os.path.getsize(file_path)
+        clean_name = os.path.basename(file_path)
 
         TASKS[task_id] = {
             "user_id": message.from_user.id,
+            "folder": task_folder,
             "file_path": file_path,
-            "title": f"{title}.mp4" if not title.endswith(".mp4") else title,
+            "title": clean_name,
             "duration": duration,
             "filesize": filesize,
             "thumb": None,
@@ -147,7 +149,7 @@ async def media_downloader(client: Client, message: Message):
 
         caption = (
             f"✅ **ডাউনলোড সম্পন্ন হয়েছে!**\n\n"
-            f"🎬 **নাম:** `{title}`\n"
+            f"🎬 **নাম:** `{clean_name}`\n"
             f"⏱ **সময়কাল:** `{time_formatter(duration)}`\n"
             f"💾 **সাইজ:** `{humanbytes(filesize)}`\n"
             f"🖼 **থাম্বনেইল:** `ডিফল্ট`\n\n"
@@ -178,12 +180,12 @@ async def button_handler(client: Client, query: CallbackQuery):
 
     if action == "rename":
         USER_STATES[query.from_user.id] = {"action": "waiting_rename", "task_id": task_id}
-        await query.message.reply_text("✏️ **অনুগ্রহ করে নতুন ফাইলের নামটি লিখে পাঠান:**\n(যেমন: `My Video.mp4`)")
+        await query.message.reply_text("✏️ **নতুন ফাইলের নামটি লিখে পাঠান:**\n(যেমন: `My Movie.mp4`)")
         await query.answer()
 
     elif action == "thumb":
         USER_STATES[query.from_user.id] = {"action": "waiting_thumb", "task_id": task_id}
-        await query.message.reply_text("🖼 **অনুগ্রহ করে থাম্বনেইল হিসেবে একটি ছবি (Photo) পাঠান:**")
+        await query.message.reply_text("🖼 **থাম্বনেইল হিসেবে একটি ছবি (Photo) পাঠান:**")
         await query.answer()
 
     elif action == "upload":
@@ -207,7 +209,6 @@ async def button_handler(client: Client, query: CallbackQuery):
                 last_edit = now
 
         try:
-            # আপলোডের ঠিক আগে Hachoir দিয়ে আবার সময় রি-চেক করা
             exact_dur = get_exact_duration(task["file_path"])
             if exact_dur > 0:
                 task["duration"] = exact_dur
@@ -221,7 +222,7 @@ async def button_handler(client: Client, query: CallbackQuery):
                 f"🤖 Powered by **OmniCore**"
             )
 
-            # টেলিগ্রামের প্লেয়ারে আসল duration_secs পাঠানো
+            # টেলিগ্রামে ফাইল আপলোড
             await query.message.reply_video(
                 video=task["file_path"],
                 caption=caption,
@@ -234,10 +235,9 @@ async def button_handler(client: Client, query: CallbackQuery):
         except Exception as e:
             await query.message.edit_text(f"❌ আপলোডে সমস্যা হয়েছে: {e}")
         finally:
-            if os.path.exists(task["file_path"]):
-                os.remove(task["file_path"])
-            if task["thumb"] and os.path.exists(task["thumb"]):
-                os.remove(task["thumb"])
+            # কাজ শেষে টাস্ক ফোল্ডার পুরোপুরি ডিলিট করে মেমোরি খালি করা
+            if os.path.exists(task["folder"]):
+                shutil.rmtree(task["folder"], ignore_errors=True)
             TASKS.pop(task_id, None)
 
 
@@ -256,12 +256,14 @@ async def input_listener(client: Client, message: Message):
         USER_STATES.pop(message.from_user.id, None)
         raise ContinuePropagation
 
+    # রিনেম করার সময় কোনো হিজিবিজি কোড না দিয়ে একদম ফ্রেশ নাম রাখা হচ্ছে
     if state["action"] == "waiting_rename" and message.text:
         new_name = message.text.strip()
         if not new_name.endswith(".mp4"):
             new_name += ".mp4"
         
-        new_path = os.path.join("downloads", f"{task_id}_{new_name}")
+        # 🔥 ফিক্স: নামের সাথে কোনো কোড নেই, শুধু পরিষ্কার নাম 🔥
+        new_path = os.path.join(task["folder"], new_name)
         os.rename(task["file_path"], new_path)
         task["file_path"] = new_path
         task["title"] = new_name
@@ -274,7 +276,7 @@ async def input_listener(client: Client, message: Message):
         await message.reply_text(f"✅ ফাইলের নাম পরিবর্তন করে `{new_name}` করা হয়েছে!\nএখন আগের মেন্যুতে গিয়ে **Done** চাপুন।")
 
     elif state["action"] == "waiting_thumb" and message.photo:
-        thumb_path = f"downloads/thumb_{task_id}.jpg"
+        thumb_path = os.path.join(task["folder"], "thumb.jpg")
         await message.download(file_name=thumb_path)
         task["thumb"] = thumb_path
         
