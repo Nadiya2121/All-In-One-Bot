@@ -1,0 +1,201 @@
+# plugins/purger.py
+import asyncio
+from pyrogram import Client, filters, errors
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from config import OWNER_ID
+from main import db
+
+HELP = {
+    "purger": "সব চ্যানেল ও গ্রুপের ড্যাশবোর্ড খুলে ১-ক্লিকে গোস্ট/ডিলিটেড মেম্বার ক্লিন করতে",
+    "add_chat <আইডি>": "ড্যাশবোর্ডে নতুন কোনো চ্যানেল বা গ্রুপ যুক্ত করতে"
+}
+
+# অ্যাডমিন ভেরিফিকেশন
+async def is_admin_user(user_id: int):
+    if user_id == OWNER_ID:
+        return True
+    if db is not None:
+        try:
+            doc = await db.settings.find_one({"_id": "mirror_config"})
+            if doc and user_id in doc.get("admins", []):
+                return True
+        except Exception:
+            pass
+    return False
+
+# ডাটাবেজ থেকে সেভ করা সব চ্যানেল ও গ্রুপ পাওয়া
+async def get_managed_chats():
+    if db is not None:
+        try:
+            cursor = db.managed_chats.find({})
+            chats = await cursor.to_list(length=100)
+            return chats
+        except Exception:
+            pass
+    return []
+
+
+# ==============================================================================
+# 🤖 নতুন কোনো চ্যানেলে বটকে অ্যাডমিন বানালেই অটো-লিস্টে যোগ হওয়ার ইঞ্জিন
+# ==============================================================================
+
+@Client.on_my_chat_member()
+async def auto_detect_chat(client: Client, update):
+    if update.new_chat_member and update.new_chat_member.status in ["administrator", "creator"]:
+        chat = update.chat
+        chat_type = "চ্যানেল 📢" if chat.type.value == "channel" else "গ্রুপ 💬"
+        if db is not None:
+            await db.managed_chats.update_one(
+                {"_id": chat.id},
+                {"$set": {"title": chat.title, "type": chat_type}},
+                upsert=True
+            )
+            print(f"[✓] নতুন {chat_type} ড্যাশবোর্ডে যুক্ত হয়েছে: {chat.title}")
+
+
+# ==============================================================================
+# 🎛️ মূল কন্ট্রোল ড্যাশবোর্ড (বটের ইনবক্স থেকে চালিত)
+# ==============================================================================
+
+@Client.on_message(filters.command(["purger", "clean_ghost"]) & filters.private)
+async def open_purger_dashboard(client: Client, message: Message):
+    if not await is_admin_user(message.from_user.id):
+        return
+
+    chats = await get_managed_chats()
+
+    if not chats:
+        await message.reply_text(
+            "📭 **কোনো চ্যানেল বা গ্রুপ যুক্ত করা নেই!**\n\n"
+            "💡 **যুক্ত করার নিয়ম:**\n"
+            "১. আপনার যেকোনো চ্যানেল বা গ্রুপে বটকে **Admin** বানিয়ে দিন (ব্যান করার পারমিশন সহ)। বট নিজে থেকেই লিস্টে যুক্ত করে নেবে!\n\n"
+            "২. অথবা এখানে ম্যানুয়ালি লিখুন:\n"
+            "`/add_chat আপনার_চ্যানেল_বা_গ্রুপ_আইডি`"
+        )
+        return
+
+    buttons = []
+    # ডাটাবেজের সব চ্যানেল ও গ্রুপ নিয়ে বাটন তৈরি
+    for chat in chats:
+        c_title = chat.get("title", "Unknown")[:25]
+        c_type = chat.get("type", "📢")
+        buttons.append([
+            InlineKeyboardButton(f"{c_type} {c_title}", callback_data=f"purge_{chat['_id']}")
+        ])
+
+    text = (
+        "🧹 **গোস্ট মেম্বার ও ডিলিটেড অ্যাকাউন্ট ক্লিনার ড্যাশবোর্ড**\n\n"
+        "👇 _আপনি যে চ্যানেল বা গ্রুপের মৃত অ্যাকাউন্টগুলো পরিষ্কার করতে চান, নিচের বাটনে ক্লিক করুন:_"
+    )
+
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+# ম্যানুয়ালি কোনো চ্যানেল ড্যাশবোর্ডে যুক্ত করা
+@Client.on_message(filters.command("add_chat") & filters.private)
+async def add_chat_manual(client: Client, message: Message):
+    if not await is_admin_user(message.from_user.id):
+        return
+
+    if len(message.command) < 2:
+        await message.reply_text("⚠️ **নিয়ম:** `/add_chat চ্যানেল_বা_গ্রুপ_আইডি`\n(যেমন: `/add_chat -1001234567890`)")
+        return
+
+    try:
+        chat_id = int(message.command[1].strip())
+        chat = await client.get_chat(chat_id)
+        chat_type = "চ্যানেল 📢" if chat.type.value == "channel" else "গ্রুপ 💬"
+
+        if db is not None:
+            await db.managed_chats.update_one(
+                {"_id": chat.id},
+                {"$set": {"title": chat.title, "type": chat_type}},
+                upsert=True
+            )
+
+        await message.reply_text(f"✅ **সফলভাবে যুক্ত হয়েছে:** {chat_type} `{chat.title}`\nএখন `/purger` দিয়ে ড্যাশবোর্ড ওপেন করুন।")
+    except Exception as e:
+        await message.reply_text(f"❌ চ্যানেল খুঁজে পাওয়া যায়নি বা বট অ্যাডমিন নেই: {e}")
+
+
+# ==============================================================================
+# 🚀 ১-ক্লিকে গোস্ট ক্লিনিং ইঞ্জিন (টেলিগ্রাম FloodWait সুরক্ষাসহ)
+# ==============================================================================
+
+@Client.on_callback_query(filters.regex(r"^purge_"))
+async def execute_purge_action(client: Client, query: CallbackQuery):
+    if not await is_admin_user(query.from_user.id):
+        await query.answer("❌ অনুমতি নেই!", show_alert=True)
+        return
+
+    chat_id = int(query.data.split("_")[1])
+
+    try:
+        chat = await client.get_chat(chat_id)
+    except Exception as e:
+        await query.answer(f"❌ চ্যাটে অ্যাক্সেস নেই: {e}", show_alert=True)
+        return
+
+    await query.message.edit_text(f"🔍 **'{chat.title}' স্ক্যান করা হচ্ছে... অনুগ্রহ করে অপেক্ষা করুন...**")
+
+    deleted_count = 0
+    scanned_count = 0
+
+    try:
+        # মেম্বারদের স্ক্যান করা
+        async for member in client.get_chat_members(chat_id):
+            scanned_count += 1
+            if member.user.is_deleted:
+                try:
+                    # পার্মানেন্ট কিক করা (ব্যান করে সাথে সাথে আনব্যান করা যাতে মেম্বার তালিকা থেকে চলে যায়)
+                    await client.ban_chat_member(chat_id, member.user.id)
+                    await client.unban_chat_member(chat_id, member.user.id)
+                    deleted_count += 1
+                    
+                    # টেলিগ্রামের ব্যান লিমিট এড়াতে ০.৩ সেকেন্ডের বিরতি
+                    await asyncio.sleep(0.3)
+                except errors.FloodWait as f:
+                    await asyncio.sleep(f.value)
+                except Exception:
+                    pass
+
+        # ব্যাক বাটন সহ রেজাল্ট
+        back_btn = InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ ড্যাশবোর্ডে ফিরে যান", callback_data="back_to_purger")]
+        ])
+
+        summary_text = (
+            f"🎉 **ক্লিনিং সম্পন্ন হয়েছে!**\n\n"
+            f"🏷️ **নাম:** `{chat.title}`\n"
+            f"📊 **মোট স্ক্যান করা মেম্বার:** `{scanned_count}` জন\n"
+            f"🗑️ **মুছে ফেলা ডিলিটেড অ্যাকাউন্ট:** `{deleted_count}` টি\n\n"
+            f"✨ _আপনার চ্যানেল/গ্রুপ এখন সম্পূর্ণ ফ্রেশ ও ভূত-মুক্ত!_"
+        )
+
+        await query.message.edit_text(summary_text, reply_markup=back_btn)
+
+    except Exception as e:
+        await query.message.edit_text(
+            f"❌ **ক্লিন করতে ব্যর্থ হয়েছে!**\n\n"
+            f"**কারণ:** `{e}`\n\n"
+            f"⚠️ _নিশ্চিত করুন বটটিকে ওই চ্যানেলে **Admin** বানিয়ে 'Ban Users' পারমিশন অন রাখা আছে কিনা!_",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ ব্যাক", callback_data="back_to_purger")]])
+        )
+
+
+# ব্যাক বাটন হ্যান্ডলার
+@Client.on_callback_query(filters.regex(r"^back_to_purger$"))
+async def back_to_dashboard(client: Client, query: CallbackQuery):
+    chats = await get_managed_chats()
+    buttons = []
+    for chat in chats:
+        c_title = chat.get("title", "Unknown")[:25]
+        c_type = chat.get("type", "📢")
+        buttons.append([
+            InlineKeyboardButton(f"{c_type} {c_title}", callback_data=f"purge_{chat['_id']}")
+        ])
+    await query.message.edit_text(
+        "🧹 **গোস্ট মেম্বার ও ডিলিটেড অ্যাকাউন্ট ক্লিনার ড্যাশবোর্ড**\n\n"
+        "👇 _যে চ্যানেল বা গ্রুপটি পরিষ্কার করতে চান, ক্লিক করুন:_",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
