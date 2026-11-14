@@ -1,7 +1,7 @@
 pyrogram
 tgcrypto
 aiohttp
-yt-dlp
+yt-dlp[default,curl-cffi]
 motor
 dnspython
 hachoir
