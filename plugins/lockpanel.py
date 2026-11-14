@@ -3,7 +3,6 @@ import os
 import io
 import re
 import time
-import uuid
 import asyncio
 import sqlite3
 from urllib.parse import quote
@@ -75,7 +74,7 @@ def init_db():
             user_id INTEGER,
             first_name TEXT,
             invite_link TEXT,
-            invite_code TEXT UNIQUE,
+            invite_code TEXT,
             count INTEGER DEFAULT 0,
             unlocked INTEGER DEFAULT 0,
             PRIMARY KEY (group_id, user_id)
@@ -189,6 +188,15 @@ def get_user_groups(owner_user_id: int):
     ]
 
 
+def get_group_total_referrals(group_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM referrals WHERE group_id = ?", (group_id,))
+    cnt = c.fetchone()[0]
+    conn.close()
+    return cnt
+
+
 def update_group_field(group_id: int, field: str, value):
     if field not in ("vip_target", "required_count", "last_msg_id", "last_text_id", "auto_minutes", "is_active", "main_invite_link", "custom_caption"):
         return
@@ -247,13 +255,18 @@ def upsert_group_user(group_id: int, user_id: int, first_name: str, invite_link:
     conn.close()
 
 
-def find_referrer_by_code(invite_code: str):
+def find_referrer(group_id: int, invite_code: str = None, invite_url: str = None):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
-    c.execute("SELECT group_id, user_id FROM group_users WHERE invite_code = ?", (invite_code,))
-    row = c.fetchone()
+    row = None
+    if invite_code:
+        c.execute("SELECT user_id FROM group_users WHERE group_id = ? AND invite_code = ?", (group_id, invite_code))
+        row = c.fetchone()
+    if not row and invite_url:
+        c.execute("SELECT user_id FROM group_users WHERE group_id = ? AND invite_link = ?", (group_id, invite_url))
+        row = c.fetchone()
     conn.close()
-    return row
+    return row[0] if row else None
 
 
 def add_referral(group_id: int, joined_user_id: int, referrer_id: int):
@@ -359,7 +372,7 @@ async def get_bot_username(client: Client) -> str:
     return BOT_USERNAME_CACHE
 
 
-async def delete_message_after(client: Client, chat_id: int, msg_id: int, delay: int = 20):
+async def delete_message_after(client: Client, chat_id: int, msg_id: int, delay: int = 10):
     await asyncio.sleep(delay)
     try:
         await client.delete_messages(chat_id, msg_id)
@@ -380,27 +393,23 @@ def parse_chat_input(text: str):
     return None
 
 
-async def get_or_create_main_invite(client: Client, chat_id: int, grp: dict) -> str:
-    link = grp.get("main_invite_link")
-    if link:
-        return link
-    try:
-        inv = await client.create_chat_invite_link(chat_id=chat_id, name="main_group_share")
-        link = inv.invite_link
-        update_group_field(chat_id, "main_invite_link", link)
-        return link
-    except Exception as e:
-        print(f"[Main Invite Error]: {e}")
-        return None
+def is_member_status(cm) -> bool:
+    if not cm:
+        return False
+    if cm.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+        return True
+    if cm.status == ChatMemberStatus.RESTRICTED and getattr(cm, "is_member", False):
+        return True
+    return False
 
 
 def get_default_bangla_caption(required: int) -> str:
     return (
         f"🔒 **প্রাইভেট ভিডিওগুলো লক করা আছে!**\n\n"
         f"✅ **ভিডিও আনলক করার নিয়ম:**\n"
-        f"১️⃣ নিচের **'{required}টি গ্রুপে শেয়ার করুন'** বাটনে চেপে {required} টি গ্রুপে শেয়ার করুন।\n"
-        f"২️⃣ আপনার লিংক থেকে **{required} জন নতুন মেম্বার** জয়েন হলেই সাথে সাথে প্রাইভেট চ্যানেলের আনলক লিংক আপনার ইনবক্সে চলে যাবে!\n\n"
-        f"👇 _নিজের ইউনিক শেয়ার লিংক পেতে **'আমার শেয়ার লিংক'** বাটনে চাপুন:_"
+        f"১️⃣ নিচের লাল বাটনে (**'{required} জনকে শেয়ার করুন'**) চাপ দিয়ে আপনার নিজস্ব শেয়ার লিংক নিন।\n"
+        f"২️⃣ লিংকটি যেকোনো **গ্রুপে বা বন্ধুদের কাছে** শেয়ার করুন। আপনার লিংক দিয়ে **{required} জন** জয়েন হলেই সাথে সাথে আপনার ইনবক্সে নোটিফিকেশন ও প্রাইভেট চ্যানেলের লিংক চলে যাবে!\n\n"
+        f"👇 _শেয়ার করে নিচের সবুজ বাটনে চাপুন:_"
     )
 
 
@@ -414,11 +423,11 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
     if not grp:
         return
 
-    # ১) অভিনন্দন মেসেজ থাকলে ২০ সেকেন্ড পর অটো-ডিলিট
+    # ১) অভিনন্দন মেসেজ থাকলে ১০ সেকেন্ড পর অটো-ডিলিট
     if congrats_text:
         try:
             c_msg = await client.send_message(chat_id, congrats_text)
-            asyncio.create_task(delete_message_after(client, chat_id, c_msg.id, delay=20))
+            asyncio.create_task(delete_message_after(client, chat_id, c_msg.id, delay=10))
         except Exception as e:
             print(f"[Congrats Send Error]: {e}")
 
@@ -437,7 +446,6 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
     required = grp["required_count"]
     guide_caption = grp.get("custom_caption") or get_default_bangla_caption(required)
 
-    # ৩) সুন্দর বাংলা গাইডলাইন মেসেজ পাঠানো
     new_text_id = 0
     try:
         t_msg = await client.send_message(chat_id, guide_caption)
@@ -446,33 +454,21 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
         print(f"[Guide Text Send Error]: {e}")
 
     sticker_id = await get_auto_sticker_id(client, chat_id)
-
-    main_link = await get_or_create_main_invite(client, chat_id, grp)
-    if main_link:
-        share_text = quote(f"🔥 {grp['title']}-এর এক্সক্লুসিভ সব ভিডিও দেখতে এখনই জয়েন করুন!")
-        forward_url = f"https://t.me/share/url?url={quote(main_link)}&text={share_text}"
-    else:
-        forward_url = f"https://t.me/{bot_username}?start=s_{chat_id}"
+    personal_share_url = f"https://t.me/{bot_username}?start=s_{chat_id}"
 
     keyboard_raw = [
         [
             {
-                "text": f"📤 {required}টি গ্রুপে শেয়ার করুন",
-                "url": forward_url,
-                "style": "danger",  # লাল বাটন
+                "text": f"📤 {required} জনকে শেয়ার করুন",
+                "url": personal_share_url,
+                "style": "danger",  # লাল বাটন -> নিজস্ব পার্সোনাল লিংক দেবে
             },
             {
                 "text": "🔓 ভিডিও দেখুন",
                 "callback_data": f"lp_chk_{chat_id}",
-                "style": "success",  # সবুজ বাটন
+                "style": "success",  # সবুজ বাটন -> গ্রুপেই পপআপ চেক
             },
-        ],
-        [
-            {
-                "text": f"🔑 আমার শেয়ার লিংক ও আনলক ({required} জয়েন)",
-                "url": f"https://t.me/{bot_username}?start=s_{chat_id}",
-            }
-        ],
+        ]
     ]
 
     new_msg_id = 0
@@ -493,7 +489,7 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
                     f"https://api.telegram.org/bot{token}/sendMessage",
                     json={
                         "chat_id": chat_id,
-                        "text": f"🔐 নিচের বাটনে ক্লিক করে {required} টি গ্রুপে শেয়ার করুন 👇",
+                        "text": f"🔐 নিচের বাটনে ক্লিক করে {required} জনকে শেয়ার করুন 👇",
                         "reply_markup": {"inline_keyboard": keyboard_raw},
                     },
                 )
@@ -505,17 +501,14 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
     if not new_msg_id:
         markup = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(f"📤 {required}টি গ্রুপে শেয়ার করুন", url=forward_url),
+                InlineKeyboardButton(f"📤 {required} জনকে শেয়ার করুন", url=personal_share_url),
                 InlineKeyboardButton("🔓 ভিডিও দেখুন", callback_data=f"lp_chk_{chat_id}"),
-            ],
-            [
-                InlineKeyboardButton(f"🔑 আমার শেয়ার লিংক ও আনলক ({required} জয়েন)", url=f"https://t.me/{bot_username}?start=s_{chat_id}"),
-            ],
+            ]
         ])
         if sticker_id:
             sent = await client.send_sticker(chat_id, sticker_id, reply_markup=markup)
         else:
-            sent = await client.send_message(chat_id, f"🔐 নিচের বাটনে ক্লিক করে {required} টি গ্রুপে শেয়ার করুন 👇", reply_markup=markup)
+            sent = await client.send_message(chat_id, f"🔐 নিচের বাটনে ক্লিক করে {required} জনকে শেয়ার করুন 👇", reply_markup=markup)
         new_msg_id = sent.id
 
     if new_text_id:
@@ -575,7 +568,7 @@ async def render_main_dashboard(client: Client, user_id: int):
     text = (
         "🎛 **OmniCore আনলকিং ড্যাশবোর্ড**\n\n"
         "• **মেইন গ্রুপ** = যেখানে মেম্বাররা থাকবে ও শেয়ার করবে।\n"
-        "• **ভিআইপি চ্যানেল** = যেটা ৩টি শেয়ার করলে ইউজাররা আনলক লিংক পাবে।\n\n"
+        "• **ভিআইপি চ্যানেল** = যেটা ৩ জন জয়েনের পর আনলক হবে।\n\n"
         f"📊 **আপনার যুক্ত করা গ্রুপ:** `{len(groups)}` টি"
     )
     buttons = [[InlineKeyboardButton("➕ নতুন আনলক সেটআপ শুরু করুন", callback_data="lp_addgrp")]]
@@ -611,12 +604,14 @@ def render_group_dashboard(group_id: int):
     auto_txt = f"প্রতি {grp['auto_minutes']} মিনিট পর পর" if grp["auto_minutes"] > 0 else "বন্ধ (শুধু নতুন মেম্বার এলে)"
     active_txt = "✅ চালু (Auto-Pilot)" if grp["is_active"] else "⏸ বিরতিতে"
     cap_txt = "কাস্টম সেট করা আছে ✅" if grp.get("custom_caption") else "ডিফল্ট বাংলা মেসেজ ✅"
+    total_refs = get_group_total_referrals(group_id)
 
     text = (
         f"⚙️ **গ্রুপ কন্ট্রোল প্যানেল**\n\n"
         f"📢 **মেইন গ্রুপ:** `{grp['title']}`\n"
         f"🔐 **ভিআইপি চ্যানেল:** {vip_status}\n"
         f"🔢 **আনলক লিমিট:** `{grp['required_count']} জন জয়েন`\n"
+        f"👥 **মোট ট্র্যাক করা জয়েন:** `{total_refs} জন`\n"
         f"⏱ **অটো প্যানেল পোস্ট:** `{auto_txt}`\n"
         f"📝 **বাংলা মেসেজ:** `{cap_txt}`\n"
         f"⚡ **স্ট্যাটাস:** `{active_txt}`"
@@ -693,15 +688,13 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
                     )
                     await query.answer("✅ আপনার ইনবক্সে (বটে) প্রাইভেট চ্যানেলের লিংক পাঠানো হয়েছে! ইনবক্স চেক করুন।", show_alert=True)
                 except Exception:
-                    await query.answer("🔑 আনলক হয়েছে! লিংক নিতে নিচের 'আমার শেয়ার লিংক' বাটনে চাপুন।", show_alert=True)
+                    await query.answer(f"🔑 আনলক হয়েছে! লিংক নিতে লাল বাটনে ('{required} জনকে শেয়ার করুন') চাপুন।", show_alert=True)
             else:
                 await query.answer("⚠️ অ্যাডমিন এখনো ভিআইপি চ্যানেল সেট করেননি।", show_alert=True)
         else:
             await query.answer(
                 f"🔒 ভিডিওগুলো লক করা আছে! ({count}/{required})\n\n"
-                f"আনলক করার নিয়ম:\n"
-                f"১) '{required}টি গ্রুপে শেয়ার করুন' বাটনে চেপে শেয়ার করুন।\n"
-                f"২) নিজের রেফারেল লিংক ও ইনবক্সে আনলক লিংক পেতে নিচের 'আমার শেয়ার লিংক' বাটনে চাপুন!",
+                f"আনলক করতে বাম পাশের লাল বাটনে ('{required} জনকে শেয়ার করুন') চাপ দিয়ে আপনার নিজস্ব লিংক নিন ও বন্ধু বা গ্রুপে শেয়ার করুন!",
                 show_alert=True,
             )
         return
@@ -762,8 +755,7 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
             [InlineKeyboardButton("🔙 বাতিল", callback_data=f"lp_grp_{group_id}")],
         ])
         await query.message.edit_text(
-            "✏️ **গ্রুপে স্টিকারের উপরে যে বাংলা মেসেজটি দেখাবে, সেটি লিখে পাঠান:**\n\n"
-            "_(যেমন: `🔒 সব ভাইরাল ভিডিও দেখতে নিচের বাটনে ক্লিক করে ৩টি গ্রুপে শেয়ার করুন!`)_",
+            "✏️ **গ্রুপে স্টিকারের উপরে যে বাংলা মেসেজটি দেখাবে, সেটি লিখে পাঠান:**",
             reply_markup=buttons,
         )
         await query.answer()
@@ -1034,7 +1026,8 @@ async def user_unlock_start(client: Client, message: Message):
     u_data = get_group_user(group_id, user.id)
 
     if not u_data or not u_data["invite_link"]:
-        invite_code = f"r_{uuid.uuid4().hex[:10]}"
+        # রিস্টার্ট হলেও ইউজার আইডি রিকভার করার জন্য কোডে user.id রাখা
+        invite_code = f"r_{user.id}_{abs(group_id) % 100000}"
         try:
             inv = await client.create_chat_invite_link(chat_id=group_id, name=invite_code)
             invite_link = inv.invite_link
@@ -1054,7 +1047,7 @@ async def user_unlock_start(client: Client, message: Message):
             btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 প্রাইভেট চ্যানেলে জয়েন করুন", url=vip_link)]])
             await message.reply_text(
                 f"🎉 **অভিনন্দন {user.first_name}!**\n\n"
-                f"আপনার {required} টি শেয়ার সম্পন্ন হয়েছে ✅\n"
+                f"আপনার {required} টি জয়েন সম্পন্ন হয়েছে ✅\n"
                 f"নিচের বাটনে ক্লিক করে প্রাইভেট ভিডিও চ্যানেলে প্রবেশ করুন:",
                 reply_markup=btn,
             )
@@ -1065,14 +1058,14 @@ async def user_unlock_start(client: Client, message: Message):
     share_text = quote(f"🔥 {grp['title']}-এর এক্সক্লুসিভ সব ভিডিও দেখতে এখনই জয়েন করুন!")
     share_url = f"https://t.me/share/url?url={quote(invite_link)}&text={share_text}"
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📤 গ্রুপে শেয়ার করুন ({count}/{required})", url=share_url)]
+        [InlineKeyboardButton(f"📤 গ্রুপে বা বন্ধুদের শেয়ার করুন ({count}/{required})", url=share_url)]
     ])
 
     await message.reply_text(
         f"🔒 **ভিডিও আনলক স্ট্যাটাস: {count}/{required}**\n\n"
-        f"প্রাইভেট চ্যানেলের লিংক পেতে নিচের **গ্রুপে শেয়ার করুন** বাটনে চেপে কমপক্ষে **{required} টি গ্রুপে** শেয়ার করুন।\n\n"
+        f"নিচের বাটনে চেপে আপনার এই লিংকটি যেকোনো **গ্রুপে বা বন্ধুদের ইনবক্সে** শেয়ার করুন।\n\n"
         f"🔗 আপনার ইউনিক শেয়ার লিংক:\n`{invite_link}`\n\n"
-        f"✅ আপনার লিংক থেকে {required} জন জয়েন হওয়ার সাথে সাথেই আমি এই ইনবক্সে আপনার **আনলক লিংক** পাঠিয়ে দেবো!",
+        f"🔔 আপনার এই লিংক থেকে **{required} জন** জয়েন হওয়ার সাথে সাথেই আমি এই ইনবক্সে আপনাকে নোটিফিকেশন ও **প্রাইভেট চ্যানেলের লিংক** পাঠিয়ে দেবো!",
         reply_markup=buttons,
         disable_web_page_preview=True,
     )
@@ -1145,32 +1138,45 @@ async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpda
     if not grp or not grp["is_active"] or not grp["vip_target"]:
         return
 
-    was_member = old_m and old_m.status in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.OWNER,
-    )
-    if was_member or new_m.status != ChatMemberStatus.MEMBER:
+    was_member = is_member_status(old_m)
+    is_now_member = is_member_status(new_m)
+    if was_member or not is_now_member:
         return
 
     bot_username = await get_bot_username(client)
     unlocked_now = False
 
     inv = update.invite_link
-    if inv and inv.name and inv.name.startswith("r_"):
-        ref_info = find_referrer_by_code(inv.name)
-        if ref_info and ref_info[0] == update.chat.id:
-            referrer_id = ref_info[1]
+    if inv:
+        inv_code = getattr(inv, "name", None)
+        inv_url = getattr(inv, "invite_link", None)
+        referrer_id = find_referrer(update.chat.id, invite_code=inv_code, invite_url=inv_url)
+
+        # যদি DB রিসেট হয়ে গিয়ে থাকে, তবুও লিংকের নাম (r_USERID_...) থেকে রিকভার করা!
+        if not referrer_id and inv_code and inv_code.startswith("r_"):
+            parts = inv_code.split("_")
+            if len(parts) >= 2 and parts[1].isdigit():
+                referrer_id = int(parts[1])
+                if not get_group_user(update.chat.id, referrer_id):
+                    try:
+                        u_obj = await client.get_users(referrer_id)
+                        u_name = u_obj.first_name
+                    except Exception:
+                        u_name = "User"
+                    upsert_group_user(update.chat.id, referrer_id, u_name, inv_url or "", inv_code)
+
+        if referrer_id:
             result = add_referral(update.chat.id, new_m.user.id, referrer_id)
             if result:
                 new_count, already_unlocked, ref_name = result
                 required = grp["required_count"]
+
                 if new_count >= required and not already_unlocked:
                     unlocked_now = True
                     mark_unlocked(update.chat.id, referrer_id)
 
                     congrats_text = (
-                        f"{ref_name} - 🎉 অভিনন্দন আপনি {required} টি গ্রুপে শেয়ার করে ভিডিও আনলক করতে সফল হয়েছে ✅"
+                        f"{ref_name} - 🎉 অভিনন্দন আপনি {required} জনকে শেয়ার করে ভিডিও আনলক করতে সফল হয়েছেন ✅"
                     )
                     await send_colorful_panel(client, update.chat.id, bot_username, congrats_text=congrats_text, force=True)
 
@@ -1182,13 +1188,28 @@ async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpda
                                 chat_id=referrer_id,
                                 text=(
                                     f"🎉 **অভিনন্দন {ref_name}!**\n\n"
-                                    f"আপনার {required} টি শেয়ার সফলভাবে সম্পন্ন হয়েছে ✅\n"
-                                    f"নিচের বাটনে ক্লিক করে আপনার প্রাইভেট ভিডিও চ্যানেলে জয়েন করুন:"
+                                    f"আপনার লিংক থেকে {required} জন জয়েন সম্পন্ন হয়েছে এবং আপনার ভিডিও আনলক হয়েছে ✅\n"
+                                    f"নিচের বাটনে ক্লিক করে প্রাইভেট ভিডিও চ্যানেলে জয়েন করুন:"
                                 ),
                                 reply_markup=btn,
                             )
                         except Exception as dm_err:
                             print(f"[DM Send Error for {referrer_id}]: {dm_err}")
+
+                elif new_count < required:
+                    remaining = required - new_count
+                    try:
+                        await client.send_message(
+                            chat_id=referrer_id,
+                            text=(
+                                f"🔔 **নতুন জয়েন নোটিফিকেশন!**\n\n"
+                                f"আপনার শেয়ার লিংক থেকে ১ জন নতুন মেম্বার জয়েন হয়েছে! ✅\n"
+                                f"📊 **বর্তমান প্রোগ্রেস:** `{new_count}/{required}`\n"
+                                f"⏳ আর মাত্র **{remaining} জন** জয়েন হলেই আপনার প্রাইভেট চ্যানেল আনলক হয়ে যাবে!"
+                            ),
+                        )
+                    except Exception:
+                        pass
 
     if not unlocked_now:
         await send_colorful_panel(client, update.chat.id, bot_username)
