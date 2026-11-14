@@ -18,12 +18,14 @@ from pyrogram.types import (
 )
 
 HELP = {
-    "lockpanel": "প্রাইভেট/পাবলিক গ্রুপ ও চ্যানেলের সম্পূর্ণ অটো-পাইলট আনলকিং ড্যাশবোর্ড"
+    "lockpanel": "মেইন গ্রুপ ও প্রাইভেট চ্যানেলের অটো-পাইলট আনলক ড্যাশবোর্ড",
+    "bindlock": "বট আগে থেকেই গ্রুপে Admin থাকলে গ্রুপে এই কমান্ড দিয়ে কানেক্ট করুন",
 }
 
 DB_PATH = "unlock_system.db"
 UNLOCK_STATES = {}       # {user_id: {"action": ..., "group_id": ...}}
-LAST_PANEL_TIME = {}     # {group_id: timestamp} ফ্লাড প্রটেকশনের জন্য
+LAST_PANEL_TIME = {}     # {group_id: timestamp}
+MSG_COUNTERS = {}        # {group_id: int}
 BOT_USERNAME_CACHE = None
 AUTO_LOOP_STARTED = False
 
@@ -50,7 +52,6 @@ def init_db():
             is_active INTEGER DEFAULT 1
         )
     """)
-    # পুরোনো টেবিলে নতুন কলাম না থাকলে যোগ করে নেওয়া
     for col_sql in [
         "ALTER TABLE groups ADD COLUMN last_msg_id INTEGER DEFAULT 0",
         "ALTER TABLE groups ADD COLUMN auto_minutes INTEGER DEFAULT 10",
@@ -370,12 +371,8 @@ def parse_chat_input(text: str):
 
 
 async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, congrats_text: str = None, force: bool = False):
-    """
-    ১) অভিনন্দন মেসেজ থাকলে সেটি পাঠাবে এবং ২০ সেকেন্ড পর অটো-ডিলিট করবে।
-    ২) আগের পুরোনো লক প্যানেলটি ডিলিট করে নতুন কালারফুল লক প্যানেল পোস্ট করবে।
-    """
     now = time.time()
-    if not force and (now - LAST_PANEL_TIME.get(chat_id, 0) < 8):
+    if not force and (now - LAST_PANEL_TIME.get(chat_id, 0) < 10):
         return
     LAST_PANEL_TIME[chat_id] = now
 
@@ -383,7 +380,6 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
     if not grp:
         return
 
-    # ১) অভিনন্দন মেসেজ থাকলে আলাদাভাবে পাঠিয়ে ২০ সেকেন্ড পর অটো-ডিলিট
     if congrats_text:
         try:
             c_msg = await client.send_message(chat_id, congrats_text)
@@ -391,7 +387,6 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
         except Exception as e:
             print(f"[Congrats Send Error]: {e}")
 
-    # ২) গ্রুপের আগের পুরোনো লক প্যানেল ডিলিট করা (যাতে গ্রুপ পরিষ্কার থাকে)
     old_msg_id = grp.get("last_msg_id", 0)
     if old_msg_id:
         try:
@@ -407,12 +402,12 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
             {
                 "text": f"Forward {required} Groups",
                 "url": f"https://t.me/{bot_username}?start=s_{chat_id}",
-                "style": "danger",  # লাল বাটন
+                "style": "danger",
             },
             {
                 "text": "Open Videos",
                 "url": f"https://t.me/{bot_username}?start=u_{chat_id}",
-                "style": "success",  # সবুজ বাটন
+                "style": "success",
             },
         ]
     ]
@@ -481,18 +476,16 @@ async def generate_vip_link(client: Client, vip_target: str) -> str:
 
 # ==================== ব্যাকগ্রাউন্ড অটো-পোস্টার লুপ ====================
 async def auto_poster_loop(client: Client):
-    last_sent = {}
     while True:
-        await asyncio.sleep(60)  # প্রতি ১ মিনিটে চেক করবে
+        await asyncio.sleep(60)
         try:
             bot_username = await get_bot_username(client)
             now = time.time()
             for group_id, vip_target, auto_mins in get_all_active_groups():
                 if not auto_mins or auto_mins <= 0:
                     continue
-                prev = last_sent.get(group_id, LAST_PANEL_TIME.get(group_id, 0))
+                prev = LAST_PANEL_TIME.get(group_id, 0)
                 if now - prev >= (auto_mins * 60):
-                    last_sent[group_id] = now
                     try:
                         await send_colorful_panel(client, group_id, bot_username, force=True)
                     except Exception as e:
@@ -508,34 +501,35 @@ def ensure_auto_loop(client: Client):
         asyncio.create_task(auto_poster_loop(client))
 
 
-# ==================== ড্যাশবোর্ড ও ২-ধাপের উইজার্ড UI ====================
+# ==================== ড্যাশবোর্ড ও ২-ধাপের স্পষ্ট উইজার্ড ====================
 async def render_main_dashboard(client: Client, user_id: int):
     groups = get_user_groups(user_id)
     text = (
-        "🎛 **OmniCore অটো-আনলকিং ড্যাশবোর্ড**\n\n"
-        "মাত্র ২ ধাপে আপনার গ্রুপ ও প্রাইভেট চ্যানেল যুক্ত করুন—বাকি সব কাজ (অটো প্যানেল পোস্ট, নতুন মেম্বার জয়েনে লক দেখানো, অভিনন্দন মেসেজ অটো-ডিলিট ও ইনবক্সে লিংক পাঠানো) বট নিজেই করবে!\n\n"
-        f"📊 **আপনার যুক্ত করা সেটআপ:** `{len(groups)}` টি"
+        "🎛 **OmniCore আনলকিং ড্যাশবোর্ড**\n\n"
+        "• **মেইন গ্রুপ** = যেখানে মেম্বাররা থাকবে ও শেয়ার করবে।\n"
+        "• **ভিআইপি চ্যানেল** = যেটা ৩টি শেয়ার করলে ইউজাররা আনলক লিংক পাবে।\n\n"
+        f"📊 **আপনার যুক্ত করা গ্রুপ:** `{len(groups)}` টি"
     )
     buttons = [[InlineKeyboardButton("➕ নতুন আনলক সেটআপ শুরু করুন", callback_data="lp_addgrp")]]
     for g in groups:
-        status_icon = "✅ অটো-চালু" if (g["vip_target"] and g["is_active"]) else ("⏸ বন্ধ" if g["vip_target"] else "⚠️ অসম্পূর্ণ")
-        buttons.append([InlineKeyboardButton(f"{status_icon} | {g['title'][:24]}", callback_data=f"lp_grp_{g['group_id']}")])
+        status_icon = "✅ চালু" if (g["vip_target"] and g["is_active"]) else ("⏸ বন্ধ" if g["vip_target"] else "⚠️ ভিআইপি চ্যানেল বাকি")
+        buttons.append([InlineKeyboardButton(f"{status_icon} | {g['title'][:22]}", callback_data=f"lp_grp_{g['group_id']}")])
 
     return text, InlineKeyboardMarkup(buttons)
 
 
 def render_step2_vip_prompt(group_id: int, group_title: str, bot_username: str):
-    vip_chn_url = f"https://t.me/{bot_username}?startchannel=vip_{group_id}&admin=invite_users"
-    vip_grp_url = f"https://t.me/{bot_username}?startgroup=vip_{group_id}&admin=invite_users"
+    vip_chn_url = f"https://t.me/{bot_username}?startchannel&admin=invite_users"
     text = (
         f"✅ **ধাপ ১/২ সম্পন্ন!** মেইন গ্রুপ **`{group_title}`** যুক্ত হয়েছে।\n\n"
-        f"🔐 **ধাপ ২/২ (শেষ ধাপ):** এবার ইউজাররা ৩টি শেয়ার করলে যে **প্রাইভেট চ্যানেল বা গ্রুপটি** আনলক হবে, সেটি নিচের বাটন থেকে সিলেক্ট করে Admin দিন!\n\n"
-        f"*(অথবা সরাসরি ওই প্রাইভেট চ্যানেলের ইনভাইট লিংক `https://t.me/+xxxx` এখানে পেস্ট করুন)*"
+        f"🔐 **ধাপ ২/২ (শেষ ধাপ): আপনার ভিআইপি/প্রাইভেট চ্যানেল দিন**\n"
+        f"যে চ্যানেলটি ইউজারদের জন্য আনলক হবে, সেটি সেট করতে নিচের **যেকোনো ১টি** কাজ করুন:\n\n"
+        f"১️⃣ আপনার ভিআইপি চ্যানেলের ইনভাইট লিংক (`https://t.me/+xxxx`) এখানে লিখে পাঠান।\n"
+        f"২️⃣ **অথবা** বটকে ভিআইপি চ্যানেলে Admin করে ওই চ্যানেলের যেকোনো **১টি পোস্ট এখানে Forward** করে দিন (এতে ১-বারের সিক্রেট লিংক তৈরি হবে)!"
     )
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ প্রাইভেট/ভিআইপি চ্যানেল সিলেক্ট করুন", url=vip_chn_url)],
-        [InlineKeyboardButton("➕ প্রাইভেট/ভিআইপি গ্রুপ সিলেক্ট করুন", url=vip_grp_url)],
-        [InlineKeyboardButton("🔙 পরে সেট করবো", callback_data=f"lp_grp_{group_id}")],
+        [InlineKeyboardButton("➕ ভিআইপি চ্যানেলে বটকে Admin দিন", url=vip_chn_url)],
+        [InlineKeyboardButton("🔙 ড্যাশবোর্ড", callback_data=f"lp_grp_{group_id}")],
     ])
     return text, buttons
 
@@ -545,21 +539,21 @@ def render_group_dashboard(group_id: int):
     if not grp:
         return "❌ তথ্য খুঁজে পাওয়া যায়নি!", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ফিরে যান", callback_data="lp_home")]])
 
-    vip_status = f"`{grp['vip_target']}`" if grp["vip_target"] else "❌ সেট করা হয়নি"
+    vip_status = f"`{grp['vip_target']}`" if grp["vip_target"] else "❌ সেট করা হয়নি (এখনি সেট করুন)"
     auto_txt = f"প্রতি {grp['auto_minutes']} মিনিট পর পর" if grp["auto_minutes"] > 0 else "বন্ধ (শুধু নতুন মেম্বার এলে)"
     active_txt = "✅ চালু (Auto-Pilot)" if grp["is_active"] else "⏸ বিরতিতে"
 
     text = (
-        f"⚙️ **অটো-পাইলট কন্ট্রোল প্যানেল**\n\n"
-        f"📢 **মেইন গ্রুপ/চ্যানেল:** `{grp['title']}`\n"
-        f"🔐 **আনলক ভিআইপি টার্গেট:** {vip_status}\n"
+        f"⚙️ **গ্রুপ কন্ট্রোল প্যানেল**\n\n"
+        f"📢 **মেইন গ্রুপ:** `{grp['title']}`\n"
+        f"🔐 **ভিআইপি চ্যানেল:** {vip_status}\n"
         f"🔢 **আনলক লিমিট:** `{grp['required_count']} জন জয়েন`\n"
         f"⏱ **অটো প্যানেল পোস্ট:** `{auto_txt}`\n"
         f"⚡ **স্ট্যাটাস:** `{active_txt}`"
     )
-    toggle_label = "⏸ অটো বন্ধ করুন" if grp["is_active"] else "▶️ অটো চালু করুন"
+    toggle_label = "⏸ অটো বন্ধ" if grp["is_active"] else "▶️ অটো চালু"
     buttons = [
-        [InlineKeyboardButton("🔐 ভিআইপি চ্যানেল/লিংক পরিবর্তন", callback_data=f"lp_setvip_{group_id}")],
+        [InlineKeyboardButton("🔐 ভিআইপি চ্যানেল/লিংক সেট করুন", callback_data=f"lp_setvip_{group_id}")],
         [
             InlineKeyboardButton("৩ জয়েন", callback_data=f"lp_cnt_{group_id}_3"),
             InlineKeyboardButton("৫ জয়েন", callback_data=f"lp_cnt_{group_id}_5"),
@@ -610,16 +604,14 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         bot_username = await get_bot_username(client)
         UNLOCK_STATES[user_id] = {"action": "waiting_group"}
         add_grp_url = f"https://t.me/{bot_username}?startgroup=bind_{user_id}&admin=invite_users+manage_chat+delete_messages"
-        add_chn_url = f"https://t.me/{bot_username}?startchannel=bind_{user_id}&admin=invite_users+post_messages+delete_messages"
         buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ মেইন গ্রুপ সিলেক্ট করে Admin দিন", url=add_grp_url)],
-            [InlineKeyboardButton("➕ মেইন চ্যানেল সিলেক্ট করে Admin দিন", url=add_chn_url)],
+            [InlineKeyboardButton("➕ মেইন গ্রুপে বটকে Admin দিন", url=add_grp_url)],
             [InlineKeyboardButton("🔙 ফিরে যান", callback_data="lp_home")],
         ])
         await query.message.edit_text(
             "📢 **ধাপ ১/২: আপনার মেইন গ্রুপ সিলেক্ট করুন**\n\n"
-            "নিচের বাটনে চাপ দিয়ে আপনার **প্রাইভেট বা পাবলিক** যেকোনো গ্রুপ সিলেক্ট করে বটকে Admin দিন (Delete ও Invite পারমিশনসহ)।\n\n"
-            "বট Admin পাওয়ার সাথে সাথেই অটোমেটিক **ধাপ ২ (ভিআইপি চ্যানেল)** সেট করার অপশন চলে আসবে!",
+            "১️⃣ নিচের বাটনে চাপ দিয়ে আপনার **মেইন গ্রুপে** বটকে Admin দিন।\n"
+            "২️⃣ **অথবা** বট আগে থেকেই গ্রুপে Admin থাকলে, ওই গ্রুপের ভেতর গিয়ে শুধু `/bindlock` লিখুন (অথবা গ্রুপের `@username` / `-100...` আইডি এখানে পাঠান)!",
             reply_markup=buttons,
         )
         await query.answer()
@@ -695,7 +687,7 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         bot_username = await get_bot_username(client)
         try:
             await send_colorful_panel(client, group_id, bot_username, force=True)
-            await query.message.reply_text("✅ গ্রুপে লক প্যানেল পোস্ট হয়েছে (এবং আগেরটি থাকলে ডিলিট করা হয়েছে)!")
+            await query.message.reply_text("✅ মেইন গ্রুপে লক প্যানেল পোস্ট হয়েছে!")
         except Exception as e:
             await query.message.reply_text(f"❌ পোস্ট করতে ব্যর্থ: `{e}`")
 
@@ -711,22 +703,56 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         await query.answer("🗑 রিমুভ করা হয়েছে!")
 
 
-# ==================== স্টেপ-২ অটো কমপ্লিশন হেল্পার ====================
+# ==================== স্টেপ-২ কমপ্লিশন ====================
 async def finish_vip_setup(client: Client, user_id: int, group_id: int, vip_val: str):
     update_group_field(group_id, "vip_target", vip_val)
     update_group_field(group_id, "is_active", 1)
     UNLOCK_STATES.pop(user_id, None)
 
     bot_username = await get_bot_username(client)
-    # সেটআপ হওয়া মাত্রই গ্রুপে অটোমেটিক প্রথম লক প্যানেল পোস্ট!
     try:
         await send_colorful_panel(client, group_id, bot_username, force=True)
-        auto_msg = "🚀 আপনার মেইন গ্রুপে প্রথম লক প্যানেলটি অটোমেটিক পোস্ট করা হয়েছে এবং অটো-পাইলট চালু হয়ে গেছে!"
+        auto_msg = "🚀 আপনার মেইন গ্রুপে এখনই লক প্যানেল পোস্ট করা হয়েছে এবং অটো-পাইলট চালু হয়ে গেছে!"
     except Exception as e:
-        auto_msg = f"⚠️ সেভ হয়েছে, তবে গ্রুপে প্রথম পোস্ট করতে সমস্যা হয়েছে (`{e}`)"
+        auto_msg = f"⚠️ সেভ হয়েছে, তবে মেইন গ্রুপে পোস্ট করতে সমস্যা হয়েছে (`{e}`)"
 
     text, markup = render_group_dashboard(group_id)
     await client.send_message(user_id, f"🎉 **সব সেটআপ ১০০% সম্পন্ন!**\n{auto_msg}\n\n{text}", reply_markup=markup)
+
+
+# ==================== গ্রুপে /bindlock কমান্ড (বট আগে থেকে Admin থাকলে) ====================
+@Client.on_message(filters.group & filters.command("bindlock"))
+async def group_bindlock_cmd(client: Client, message: Message):
+    ensure_auto_loop(client)
+    if not message.from_user:
+        return
+    user_id = message.from_user.id
+
+    try:
+        member = await client.get_chat_member(message.chat.id, user_id)
+        if member.status not in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
+            return
+        me = await client.get_me()
+        bot_m = await client.get_chat_member(message.chat.id, me.id)
+        if bot_m.status != ChatMemberStatus.ADMINISTRATOR or not (bot_m.privileges and bot_m.privileges.can_invite_users):
+            await message.reply_text("⚠️ আগে বটকে `Invite Users via Link` এবং `Delete Messages` পারমিশনসহ Admin দিন!")
+            return
+    except Exception:
+        return
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    save_group(message.chat.id, message.chat.title or "Main Group", user_id)
+    UNLOCK_STATES[user_id] = {"action": "waiting_vip", "group_id": message.chat.id}
+    bot_username = await get_bot_username(client)
+    text, buttons = render_step2_vip_prompt(message.chat.id, message.chat.title or "Main Group", bot_username)
+    try:
+        await client.send_message(user_id, text, reply_markup=buttons)
+    except Exception:
+        pass
 
 
 # ==================== প্রাইভেট ইনপুট লিসেনার ====================
@@ -749,7 +775,7 @@ async def lockpanel_input_listener(client: Client, message: Message):
         elif message.text:
             parsed = parse_chat_input(message.text)
             if not parsed:
-                await message.reply_text("⚠️ সরাসরি `t.me/+...` লিংকের বদলে উপরের **বাটন দিয়ে গ্রুপ সিলেক্ট** করুন অথবা `@username` / `-100...` আইডি দিন।")
+                await message.reply_text("⚠️ ওই গ্রুপে গিয়ে `/bindlock` লিখুন অথবা বাটন দিয়ে গ্রুপ সিলেক্ট করুন।")
                 return
             try:
                 target_chat = await client.get_chat(parsed)
@@ -757,26 +783,25 @@ async def lockpanel_input_listener(client: Client, message: Message):
                 await message.reply_text("❌ গ্রুপটি খুঁজে পাওয়া যায়নি! আগে বটকে সেখানে Admin দিন।")
                 return
 
-        if not target_chat or target_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL):
-            await message.reply_text("⚠️ সঠিক একটি গ্রুপ বা চ্যানেল দিন।")
+        if not target_chat or target_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await message.reply_text("⚠️ ধাপ ১-এ শুধু আপনার **মেইন গ্রুপ** দিন (চ্যানেল নয়)। চ্যানেল পরের ধাপে দেবেন।")
             return
 
         try:
             member = await client.get_chat_member(target_chat.id, user_id)
             if member.status not in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
-                await message.reply_text("❌ আপনি এটির Admin নন!")
+                await message.reply_text("❌ আপনি এই গ্রুপের Admin নন!")
                 return
             me = await client.get_me()
             bot_m = await client.get_chat_member(target_chat.id, me.id)
             if bot_m.status != ChatMemberStatus.ADMINISTRATOR or not (bot_m.privileges and bot_m.privileges.can_invite_users):
-                await message.reply_text("⚠️ বটকে সেখানে **Invite Users via Link** এবং **Delete Messages** পারমিশনসহ Admin বানান!")
+                await message.reply_text("⚠️ বটকে গ্রুপে **Invite Users via Link** এবং **Delete Messages** পারমিশনসহ Admin বানান!")
                 return
         except Exception as e:
             await message.reply_text(f"❌ যাচাই করা যায়নি: `{e}`")
             return
 
-        save_group(target_chat.id, target_chat.title or "Private Chat", user_id)
-        # সাথে সাথেই ধাপ ২-এ নিয়ে যাওয়া!
+        save_group(target_chat.id, target_chat.title or "Main Group", user_id)
         UNLOCK_STATES[user_id] = {"action": "waiting_vip", "group_id": target_chat.id}
         bot_username = await get_bot_username(client)
         text, buttons = render_step2_vip_prompt(target_chat.id, target_chat.title or "Group", bot_username)
@@ -797,7 +822,7 @@ async def lockpanel_input_listener(client: Client, message: Message):
                 vip_val = txt
 
         if not vip_val:
-            await message.reply_text("⚠️ প্রাইভেট চ্যানেলের ইনভাইট লিংক (`https://t.me/+...`) দিন অথবা বাটন থেকে চ্যানেল সিলেক্ট করুন।")
+            await message.reply_text("⚠️ প্রাইভেট চ্যানেলের ইনভাইট লিংক (`https://t.me/+...`) পেস্ট করুন অথবা চ্যানেলের যেকোনো ১টি পোস্ট এখানে Forward করুন!")
             return
 
         await finish_vip_setup(client, user_id, group_id, vip_val)
@@ -827,10 +852,10 @@ async def group_start_bind_backup(client: Client, message: Message):
     except Exception:
         pass
 
-    save_group(message.chat.id, message.chat.title or "Group", target_user_id)
+    save_group(message.chat.id, message.chat.title or "Main Group", target_user_id)
     UNLOCK_STATES[target_user_id] = {"action": "waiting_vip", "group_id": message.chat.id}
     bot_username = await get_bot_username(client)
-    text, buttons = render_step2_vip_prompt(message.chat.id, message.chat.title or "Group", bot_username)
+    text, buttons = render_step2_vip_prompt(message.chat.id, message.chat.title or "Main Group", bot_username)
     await client.send_message(target_user_id, text, reply_markup=buttons)
 
 
@@ -851,7 +876,7 @@ async def user_unlock_start(client: Client, message: Message):
 
     grp = get_group(group_id)
     if not grp:
-        await message.reply_text("⚠️ এই গ্রুপ/চ্যানেলের আনলক সিস্টেম বর্তমানে সক্রিয় নেই।")
+        await message.reply_text("⚠️ এই গ্রুপের আনলক সিস্টেম বর্তমানে সক্রিয় নেই।")
         return
 
     user = message.from_user
@@ -903,7 +928,23 @@ async def user_unlock_start(client: Client, message: Message):
     )
 
 
-# ==================== অটো বাইন্ডিং, নতুন মেম্বারে লক দেখানো ও রেফারেল ট্র্যাকার ====================
+# ==================== গ্রুপের অ্যাক্টিভিটি কাউন্টার (প্রতি ১০ মেসেজে প্যানেল) ====================
+@Client.on_message(filters.group, group=10)
+async def group_activity_lock_trigger(client: Client, message: Message):
+    ensure_auto_loop(client)
+    grp = get_group(message.chat.id)
+    if grp and grp["is_active"] and grp["vip_target"]:
+        cnt = MSG_COUNTERS.get(message.chat.id, 0) + 1
+        if cnt >= 10:
+            MSG_COUNTERS[message.chat.id] = 0
+            bot_username = await get_bot_username(client)
+            await send_colorful_panel(client, message.chat.id, bot_username)
+        else:
+            MSG_COUNTERS[message.chat.id] = cnt
+    raise ContinuePropagation
+
+
+# ==================== অটো বাইন্ডিং, নতুন মেম্বার লক ও রেফারেল ট্র্যাকার ====================
 @Client.on_chat_member_updated()
 async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpdated):
     ensure_auto_loop(client)
@@ -914,37 +955,40 @@ async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpda
 
     me = await client.get_me()
 
-    # ১) বটকে যখন কোনো গ্রুপ বা চ্যানেলে Admin হিসেবে অ্যাড করা হবে:
+    # ১) বটকে যখন Admin হিসেবে অ্যাড করা হবে (from_user না থাকলেও UNLOCK_STATES থেকে খুঁজে নেবে!)
     if new_m.user.id == me.id and new_m.status == ChatMemberStatus.ADMINISTRATOR:
-        adder = update.from_user
-        if adder and adder.id in UNLOCK_STATES:
-            state = UNLOCK_STATES[adder.id]
-            if state["action"] == "waiting_group":
+        adder_id = update.from_user.id if update.from_user else None
+        if not adder_id or adder_id not in UNLOCK_STATES:
+            for uid in list(UNLOCK_STATES.keys()):
+                try:
+                    m = await client.get_chat_member(update.chat.id, uid)
+                    if m.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
+                        adder_id = uid
+                        break
+                except Exception:
+                    pass
+
+        if adder_id and adder_id in UNLOCK_STATES:
+            state = UNLOCK_STATES[adder_id]
+            if state["action"] == "waiting_group" and update.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
                 if not (new_m.privileges and new_m.privileges.can_invite_users):
-                    await client.send_message(
-                        adder.id,
-                        f"⚠️ **{update.chat.title}**-এ বটকে `Invite Users via Link` ও `Delete Messages` পারমিশন দিন!",
-                    )
+                    await client.send_message(adder_id, f"⚠️ **{update.chat.title}**-এ বটকে `Invite Users via Link` পারমিশন দিন!")
                     return
-                save_group(update.chat.id, update.chat.title or "Group", adder.id)
-                # সাথে সাথেই ধাপ ২ (ভিআইপি চ্যানেল) চাওয়া!
-                UNLOCK_STATES[adder.id] = {"action": "waiting_vip", "group_id": update.chat.id}
+                save_group(update.chat.id, update.chat.title or "Main Group", adder_id)
+                UNLOCK_STATES[adder_id] = {"action": "waiting_vip", "group_id": update.chat.id}
                 bot_username = await get_bot_username(client)
-                text, buttons = render_step2_vip_prompt(update.chat.id, update.chat.title or "Group", bot_username)
-                await client.send_message(adder.id, text, reply_markup=buttons)
+                text, buttons = render_step2_vip_prompt(update.chat.id, update.chat.title or "Main Group", bot_username)
+                await client.send_message(adder_id, text, reply_markup=buttons)
                 return
 
-            elif state["action"] == "waiting_vip":
+            elif state["action"] == "waiting_vip" and update.chat.type == ChatType.CHANNEL:
                 if not (new_m.privileges and new_m.privileges.can_invite_users):
-                    await client.send_message(
-                        adder.id,
-                        f"⚠️ ভিআইপি চ্যাট **{update.chat.title}**-এ বটকে `Invite Users via Link` পারমিশন দিন!",
-                    )
+                    await client.send_message(adder_id, f"⚠️ ভিআইপি চ্যানেল **{update.chat.title}**-এ `Invite Users via Link` পারমিশন দিন!")
                     return
-                await finish_vip_setup(client, adder.id, state["group_id"], str(update.chat.id))
+                await finish_vip_setup(client, adder_id, state["group_id"], str(update.chat.id))
                 return
 
-    # ২) নতুন মেম্বার জয়েন করলে (রেফারেল চেক + অটো লক প্যানেল):
+    # ২) নতুন মেম্বার মেইন গ্রুপে জয়েন করলে:
     if new_m.user.is_bot:
         return
 
@@ -963,7 +1007,6 @@ async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpda
     bot_username = await get_bot_username(client)
     unlocked_now = False
 
-    # রেফারেল লিংক দিয়ে ঢুকেছে কিনা চেক
     inv = update.invite_link
     if inv and inv.name and inv.name.startswith("r_"):
         ref_info = find_referrer_by_code(inv.name)
@@ -977,13 +1020,11 @@ async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpda
                     unlocked_now = True
                     mark_unlocked(update.chat.id, referrer_id)
 
-                    # ক) গ্রুপে অভিনন্দন মেসেজ (২০ সেকেন্ড পর অটো-ডিলিট) + নতুন লক প্যানেল
                     congrats_text = (
                         f"{ref_name} - 🎉 অভিনন্দন আপনি {required} টি গ্রুপে শেয়ার করে ভিডিও আনলক করতে সফল হয়েছে ✅"
                     )
                     await send_colorful_panel(client, update.chat.id, bot_username, congrats_text=congrats_text, force=True)
 
-                    # খ) ইউজারের প্রাইভেট ইনবক্সে ভিআইপি চ্যানেলের আনলক লিংক পাঠানো
                     vip_link = await generate_vip_link(client, grp["vip_target"])
                     if vip_link:
                         try:
@@ -1000,6 +1041,5 @@ async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpda
                         except Exception as dm_err:
                             print(f"[DM Send Error for {referrer_id}]: {dm_err}")
 
-    # যদি সাধারণ নতুন মেম্বার জয়েন করে (আনলক ইভেন্ট না হয়), তবুও গ্রুপে লক সিস্টেম দেখাবে (আগেরটা ডিলিট করে)
     if not unlocked_now:
         await send_colorful_panel(client, update.chat.id, bot_username)
