@@ -1,18 +1,31 @@
 # plugins/sharelock.py
 import urllib.parse
 import asyncio
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from config import OWNER_ID
 from main import db
 
 HELP = {
-    "set_viral <গ্রুপ_লিংক> <ভিআইপি_চ্যানেল_লিংক>": "ভাইরাল শেয়ার-লকার সিস্টেমের লিংক সেট করতে",
-    "viral_post": "গ্রুপে তালা মারা ভাইরাল পোস্ট পাঠাতে",
-    "viral_status": "ভাইরাল সিস্টেমের সেটিংস দেখতে"
+    "set_viral <গ্রুপ_লিংক> <ভিআইপি_লিংক>": "ভাইরাল লকারের গ্রুপ ও ভিআইপি লিংক সেট করতে (সব অ্যাডমিনের জন্য)",
+    "viral_post": "গ্রুপে তালা মারা ভাইরাল পোস্ট পাঠাতে (সব অ্যাডমিনের জন্য)",
+    "viral_status": "ভাইরাল সিস্টেমের সেটিংস চেক করতে"
 }
 
 DEFAULT_SHARE_TEXT = "🔥 সব নতুন ভাইরাল ভিডিও ও মুভি সবার আগে দেখতে এখনই জয়েন করুন 👇"
+
+# 🔥 যেকোনো অনুমোদিত অ্যাডমিন কিনা যাচাই করার ইঞ্জিন 🔥
+async def is_admin_user(user_id: int):
+    if user_id == OWNER_ID:
+        return True
+    if db is not None:
+        try:
+            doc = await db.settings.find_one({"_id": "mirror_config"})
+            if doc and user_id in doc.get("admins", []):
+                return True
+        except Exception:
+            pass
+    return False
 
 # কনফিগারেশন আনা
 async def get_viral_config():
@@ -32,12 +45,14 @@ async def get_viral_config():
 
 
 # ==============================================================================
-# 🛠️ অ্যাডমিন কন্ট্রোল কমান্ডসমূহ
+# 🛠️ অ্যাডমিন কন্ট্রোল কমান্ডসমূহ (আপনার সবকটি অ্যাডমিন আইডির জন্য উন্মুক্ত)
 # ==============================================================================
 
-@Client.on_message(filters.command("set_viral") & filters.private)
+@Client.on_message(filters.command("set_viral"))
 async def setup_viral_links(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
+    # যেকোনো অ্যাডমিন আইডি কিনা চেক করা
+    if not await is_admin_user(message.from_user.id):
+        await message.reply_text("❌ শুধুমাত্র অনুমোদিত অ্যাডমিনরা এটি সেট করতে পারবেন!")
         return
 
     if len(message.command) < 3:
@@ -59,11 +74,14 @@ async def setup_viral_links(client: Client, message: Message):
             upsert=True
         )
 
-    await message.reply_text("🎉 **সফলভাবে ভাইরাল লকার কনফিগার হয়েছে!**\nএখন গ্রুপে পোস্ট দিতে লিখুন: `/viral_post`")
+    await message.reply_text("🎉 **সফলভাবে ভাইরাল লকার কনফিগার হয়েছে!**\nএখন গ্রুপে পোস্ট দিতে যেকোনো অ্যাডমিন আইডি থেকে লিখুন: `/viral_post`")
 
 
-@Client.on_message(filters.command("viral_status") & filters.private)
+@Client.on_message(filters.command("viral_status"))
 async def viral_status_command(client: Client, message: Message):
+    if not await is_admin_user(message.from_user.id):
+        return
+
     cfg = await get_viral_config()
     text = (
         f"🚀 **ভাইরাল শেয়ার-লকার স্ট্যাটাস:**\n\n"
@@ -74,9 +92,12 @@ async def viral_status_command(client: Client, message: Message):
     await message.reply_text(text)
 
 
-# গ্রুপে বা চ্যানেলে তালা মারা পোস্ট পাঠানোর কমান্ড
+# গ্রুপে তালা মারা পোস্ট পাঠানোর কমান্ড (যেকোনো অ্যাডমিন আইডি থেকে পাঠানো যাবে)
 @Client.on_message(filters.command("viral_post"))
 async def send_viral_post(client: Client, message: Message):
+    if not await is_admin_user(message.from_user.id):
+        return
+
     cfg = await get_viral_config()
 
     encoded_msg = urllib.parse.quote(f"{cfg.get('share_text')}\n{cfg.get('group_link')}")
@@ -104,10 +125,10 @@ async def send_viral_post(client: Client, message: Message):
 
 
 # ==============================================================================
-# 🔥 শেয়ার কাউন্টার ও সিক্রেট আনলক ইঞ্জিন (শুধুমাত্র শেয়ারকারীই পাবে)
+# 🔥 সাধারণ মেম্বারদের জন্য বাটন ও সিক্রেট আনলক ইঞ্জিন (সবার জন্য উন্মুক্ত)
 # ==============================================================================
 
-# ১. ইউজার যখন শেয়ার চেক / পয়েন্ট বাটনে চাপ দেবে
+# ১. সাধারণ ইউজার যখন পয়েন্ট বাটনে চাপ দেবে
 @Client.on_callback_query(filters.regex(r"^btn_click_share$"))
 async def count_user_shares(client: Client, query: CallbackQuery):
     user_id = query.from_user.id
@@ -137,7 +158,7 @@ async def count_user_shares(client: Client, query: CallbackQuery):
         await query.answer("🎉 অভিনন্দন! আপনার ৩টি শেয়ার সম্পন্ন হয়েছে! এখন 'Open Videos' বাটনে চাপ দিন!", show_alert=True)
 
 
-# ২. ইউজার যখন 'Open Videos' বা ভিআইপি চ্যানেলের বাটনে চাপ দেবে
+# ২. সাধারণ ইউজার যখন 'Open Videos' বাটনে চাপ দেবে
 @Client.on_callback_query(filters.regex(r"^check_unlock$"))
 async def verify_and_grant_vip(client: Client, query: CallbackQuery):
     user_id = query.from_user.id
@@ -154,7 +175,6 @@ async def verify_and_grant_vip(client: Client, query: CallbackQuery):
     if user_shares >= req:
         vip_link = cfg.get("vip_link")
 
-        # স্ক্রিনশটের মতো চাবি ওয়ালা সুন্দর আনলক মেসেজ
         unlock_msg = (
             f"<b>{user_name}</b> - 🎉 <b>অভিনন্দন!</b>\n"
             "আপনি ৩ টি গ্রুপে শেয়ার করে ভিডিও আনলক করতে সফল হয়েছেন ✅\n\n"
@@ -168,9 +188,9 @@ async def verify_and_grant_vip(client: Client, query: CallbackQuery):
         await query.answer("✅ সফলভাবে আনলক হয়েছে!", show_alert=False)
 
     else:
-        # যদি ৩টি শেয়ার না করেই ফাঁকিবাজি করে চাপ দেয়
+        # যদি ফাঁকিবাজি করে ৩টি শেয়ার না করেই চাপ দেয়
         remaining = req - user_shares
         await query.answer(
-            f"❌ আনলক ব্যর্থ হয়েছে!\n\nআপনি এখনও ৩টি গ্রুপে শেয়ার করেননি। আপনার বাকি আছে আর {remaining}টি শেয়ার!\n\nদয়া করে আগে 'Forward 3 Groups' দিয়ে শেয়ার করুন।",
+            f"❌ আনলক ব্যর্থ হয়েছে!\n\nআপনি এখনও ৩টি গ্রুপে শেয়ার করেননি। আপনার বাকি আছে আর {remaining}টি শেয়ার!\n\nদয়া করে আগে 'Forward 3 Groups' দিয়ে ৩টি গ্রুপে শেয়ার করুন।",
             show_alert=True
         )
