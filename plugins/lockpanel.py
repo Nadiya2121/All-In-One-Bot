@@ -2,13 +2,14 @@
 import os
 import io
 import re
+import html
 import time
 import asyncio
 import sqlite3
 from urllib.parse import quote
 import aiohttp
 from pyrogram import Client, filters, ContinuePropagation, StopPropagation
-from pyrogram.enums import ChatMemberStatus, ChatType
+from pyrogram.enums import ChatMemberStatus, ChatType, ParseMode
 from pyrogram.types import (
     Message,
     ChatMemberUpdated,
@@ -18,7 +19,7 @@ from pyrogram.types import (
 )
 
 HELP = {
-    "lockpanel": "মেইন গ্রুপ ও প্রাইভেট চ্যানেলের সম্পূর্ণ বাংলা আনলক ড্যাশবোর্ড",
+    "lockpanel": "ছবি/ব্যানারসহ মেইন গ্রুপ ও প্রাইভেট চ্যানেলের সম্পূর্ণ বাংলা আনলক ড্যাশবোর্ড",
     "bindlock": "বট আগে থেকেই গ্রুপে Admin থাকলে গ্রুপে এই কমান্ড দিয়ে কানেক্ট করুন",
 }
 
@@ -51,7 +52,8 @@ def init_db():
             auto_minutes INTEGER DEFAULT 0,
             is_active INTEGER DEFAULT 1,
             main_invite_link TEXT,
-            custom_caption TEXT
+            custom_caption TEXT,
+            custom_photo_id TEXT
         )
     """)
     for col_sql in [
@@ -61,6 +63,7 @@ def init_db():
         "ALTER TABLE groups ADD COLUMN is_active INTEGER DEFAULT 1",
         "ALTER TABLE groups ADD COLUMN main_invite_link TEXT",
         "ALTER TABLE groups ADD COLUMN custom_caption TEXT",
+        "ALTER TABLE groups ADD COLUMN custom_photo_id TEXT",
     ]:
         try:
             c.execute(col_sql)
@@ -123,7 +126,7 @@ def save_group(group_id: int, title: str, owner_user_id: int):
         )
     else:
         c.execute(
-            "INSERT INTO groups (group_id, group_title, owner_user_id, vip_target, required_count, last_msg_id, last_text_id, auto_minutes, is_active, main_invite_link, custom_caption) VALUES (?, ?, ?, NULL, 3, 0, 0, 0, 1, NULL, NULL)",
+            "INSERT INTO groups (group_id, group_title, owner_user_id, vip_target, required_count, last_msg_id, last_text_id, auto_minutes, is_active, main_invite_link, custom_caption, custom_photo_id) VALUES (?, ?, ?, NULL, 3, 0, 0, 0, 1, NULL, NULL, NULL)",
             (group_id, title, owner_user_id),
         )
     conn.commit()
@@ -134,7 +137,7 @@ def get_group(group_id: int):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
     c.execute(
-        "SELECT group_id, group_title, owner_user_id, vip_target, required_count, last_msg_id, last_text_id, auto_minutes, is_active, main_invite_link, custom_caption FROM groups WHERE group_id = ?",
+        "SELECT group_id, group_title, owner_user_id, vip_target, required_count, last_msg_id, last_text_id, auto_minutes, is_active, main_invite_link, custom_caption, custom_photo_id FROM groups WHERE group_id = ?",
         (group_id,),
     )
     row = c.fetchone()
@@ -152,6 +155,7 @@ def get_group(group_id: int):
             "is_active": bool(row[8] if row[8] is not None else 1),
             "main_invite_link": row[9],
             "custom_caption": row[10],
+            "custom_photo_id": row[11],
         }
     return None
 
@@ -197,7 +201,18 @@ def get_group_total_referrals(group_id: int) -> int:
 
 
 def update_group_field(group_id: int, field: str, value):
-    if field not in ("vip_target", "required_count", "last_msg_id", "last_text_id", "auto_minutes", "is_active", "main_invite_link", "custom_caption"):
+    allowed = (
+        "vip_target",
+        "required_count",
+        "last_msg_id",
+        "last_text_id",
+        "auto_minutes",
+        "is_active",
+        "main_invite_link",
+        "custom_caption",
+        "custom_photo_id",
+    )
+    if field not in allowed:
         return
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
@@ -351,7 +366,7 @@ async def get_auto_sticker_id(client: Client, temp_chat_id: int) -> str:
     return None
 
 
-# ==================== ইউটিলিটি, অটো-ডিলিট ও বাংলা কালারফুল প্যানেল ====================
+# ==================== ইউটিলিটি ও প্রিমিয়াম প্যানেল (ছবি / স্টিকার + কালারফুল বাটন) ====================
 def get_bot_token(client: Client) -> str:
     token = getattr(client, "bot_token", None)
     if not token:
@@ -402,13 +417,14 @@ def is_member_status(cm) -> bool:
     return False
 
 
-def get_default_bangla_caption(required: int) -> str:
+def get_default_bilingual_html(required: int) -> str:
     return (
-        f"🔒 **প্রাইভেট ভিডিওগুলো লক করা আছে!**\n\n"
-        f"✅ **ভিডিও আনলক করার নিয়ম:**\n"
-        f"১️⃣ নিচের লাল বাটনে (**'{required} জনকে শেয়ার করুন'**) চাপ দিয়ে আপনার নিজস্ব শেয়ার লিংক নিন।\n"
-        f"২️⃣ লিংকটি যেকোনো **গ্রুপে বা বন্ধুদের কাছে** শেয়ার করুন। আপনার লিংক দিয়ে **{required} জন** জয়েন হলেই সাথে সাথে আপনার ইনবক্সে নোটিফিকেশন ও প্রাইভেট চ্যানেলের লিংক চলে যাবে!\n\n"
-        f"👇 _শেয়ার করে নিচের সবুজ বাটনে চাপুন:_"
+        f"🔒 <b>প্রাইভেট চ্যানেল ও মিডিয়া লক করা আছে!</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🇧🇩 এই গ্রুপের এক্সক্লুসিভ ভিডিও আনলক করতে নিচের লাল বাটন থেকে আপনার লিংক নিয়ে মাত্র <b>{required} জনকে</b> (গ্রুপে বা বন্ধুদের) জয়েন করান! ☑️\n\n"
+        f"🇬🇧 <b>𝐌𝐞𝐝𝐢𝐚 𝐢𝐬 𝐥𝐨𝐜𝐤𝐞𝐝 𝐟𝐨𝐫 𝐲𝐨𝐮! 𝐈𝐧𝐯𝐢𝐭𝐞 {required} 𝐟𝐫𝐢𝐞𝐧𝐝𝐬 𝐨𝐫 𝐠𝐫𝐨𝐮𝐩𝐬 𝐮𝐬𝐢𝐧𝐠 𝐲𝐨𝐮𝐫 𝐥𝐢𝐧𝐤 𝐭𝐨 𝐮𝐧𝐥𝐨𝐜𝐤 𝐢𝐧𝐬𝐭𝐚𝐧𝐭𝐥𝐲.</b> 🔓\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"⚡ <i>{required} জন জয়েন হওয়া মাত্রই আপনার ইনবক্সে আনলক লিংক পৌঁছে যাবে!</i>"
     )
 
 
@@ -419,7 +435,7 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str):
     if not grp:
         return
 
-    # আগের পুরোনো বাংলা লেখা ও স্টিকার ডিলিট করা (শুধু নতুন প্যানেল পোস্ট করার সময়)
+    # আগের পুরোনো প্যানেল ডিলিট করা
     to_delete = []
     if grp.get("last_text_id"):
         to_delete.append(grp["last_text_id"])
@@ -432,17 +448,14 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str):
             pass
 
     required = grp["required_count"]
-    guide_caption = grp.get("custom_caption") or get_default_bangla_caption(required)
-
-    new_text_id = 0
-    try:
-        t_msg = await client.send_message(chat_id, guide_caption)
-        new_text_id = t_msg.id
-    except Exception as e:
-        print(f"[Guide Text Send Error]: {e}")
-
-    sticker_id = await get_auto_sticker_id(client, chat_id)
+    custom_cap = grp.get("custom_caption")
+    custom_photo = grp.get("custom_photo_id")
     personal_share_url = f"https://t.me/{bot_username}?start=s_{chat_id}"
+
+    if custom_cap:
+        caption_html = html.escape(custom_cap)
+    else:
+        caption_html = get_default_bilingual_html(required)
 
     keyboard_raw = [
         [
@@ -458,9 +471,58 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str):
             },
         ]
     ]
+    markup_fallback = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"📤 {required} জনকে শেয়ার করুন", url=personal_share_url),
+            InlineKeyboardButton("🔓 ভিডিও দেখুন", callback_data=f"lp_chk_{chat_id}"),
+        ]
+    ])
 
-    new_msg_id = 0
     token = get_bot_token(client)
+    new_text_id = 0
+    new_msg_id = 0
+
+    # ==================== মোড A: ছবি/ব্যানার আপলোড করা থাকলে (১টি প্রিমিয়াম কার্ড) ====================
+    if custom_photo:
+        if token:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"https://api.telegram.org/bot{token}/sendPhoto",
+                    json={
+                        "chat_id": chat_id,
+                        "photo": custom_photo,
+                        "caption": caption_html,
+                        "parse_mode": "HTML",
+                        "reply_markup": {"inline_keyboard": keyboard_raw},
+                    },
+                )
+                if resp.status == 200:
+                    data = await resp.json()
+                    new_msg_id = data.get("result", {}).get("message_id", 0)
+
+        if not new_msg_id:
+            sent = await client.send_photo(
+                chat_id=chat_id,
+                photo=custom_photo,
+                caption=caption_html,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup_fallback,
+            )
+            new_msg_id = sent.id
+
+        update_group_field(chat_id, "last_text_id", 0)
+        update_group_field(chat_id, "last_msg_id", new_msg_id)
+        return
+
+    # ==================== মোড B: ছবি না থাকলে (বাংলা/ইংরেজি মেসেজ + তালা-চাবির স্টিকার) ====================
+    try:
+        t_msg = await client.send_message(chat_id, caption_html, parse_mode=ParseMode.HTML)
+        new_text_id = t_msg.id
+    except Exception as e:
+        print(f"[Guide Text Send Error]: {e}")
+
+    sticker_id = await get_auto_sticker_id(client, chat_id)
+
     if token:
         async with aiohttp.ClientSession() as session:
             if sticker_id:
@@ -481,28 +543,19 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str):
                         "reply_markup": {"inline_keyboard": keyboard_raw},
                     },
                 )
-
             if resp.status == 200:
                 data = await resp.json()
                 new_msg_id = data.get("result", {}).get("message_id", 0)
 
     if not new_msg_id:
-        markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(f"📤 {required} জনকে শেয়ার করুন", url=personal_share_url),
-                InlineKeyboardButton("🔓 ভিডিও দেখুন", callback_data=f"lp_chk_{chat_id}"),
-            ]
-        ])
         if sticker_id:
-            sent = await client.send_sticker(chat_id, sticker_id, reply_markup=markup)
+            sent = await client.send_sticker(chat_id, sticker_id, reply_markup=markup_fallback)
         else:
-            sent = await client.send_message(chat_id, f"🔐 নিচের বাটনে ক্লিক করে {required} জনকে শেয়ার করুন 👇", reply_markup=markup)
+            sent = await client.send_message(chat_id, f"🔐 নিচের বাটনে ক্লিক করে {required} জনকে শেয়ার করুন 👇", reply_markup=markup_fallback)
         new_msg_id = sent.id
 
-    if new_text_id:
-        update_group_field(chat_id, "last_text_id", new_text_id)
-    if new_msg_id:
-        update_group_field(chat_id, "last_msg_id", new_msg_id)
+    update_group_field(chat_id, "last_text_id", new_text_id)
+    update_group_field(chat_id, "last_msg_id", new_msg_id)
 
 
 async def generate_vip_link(client: Client, vip_target: str) -> str:
@@ -523,7 +576,7 @@ async def generate_vip_link(client: Client, vip_target: str) -> str:
         return None
 
 
-# ==================== ব্যাকগ্রাউন্ড অটো-পোস্টার লুপ (ঐচ্ছিক টাইমার অন থাকলে) ====================
+# ==================== ব্যাকগ্রাউন্ড অটো-পোস্টার লুপ ====================
 async def auto_poster_loop(client: Client):
     while True:
         await asyncio.sleep(60)
@@ -591,7 +644,8 @@ def render_group_dashboard(group_id: int):
     vip_status = f"`{grp['vip_target']}`" if grp["vip_target"] else "❌ সেট করা হয়নি"
     auto_txt = f"প্রতি {grp['auto_minutes']} মিনিট পর পর" if grp["auto_minutes"] > 0 else "বন্ধ (প্যানেল স্থির থাকবে ✅)"
     active_txt = "✅ চালু" if grp["is_active"] else "⏸ বিরতিতে"
-    cap_txt = "কাস্টম সেট করা আছে ✅" if grp.get("custom_caption") else "ডিফল্ট বাংলা মেসেজ ✅"
+    cap_txt = "কাস্টম সেট করা আছে ✅" if grp.get("custom_caption") else "ডিফল্ট (বাংলা + ইংরেজি) ✅"
+    photo_txt = "কাস্টম ব্যানার ছবি ✅" if grp.get("custom_photo_id") else "অটো তালা-চাবি স্টিকার 🔒"
     total_refs = get_group_total_referrals(group_id)
 
     text = (
@@ -600,15 +654,18 @@ def render_group_dashboard(group_id: int):
         f"🔐 **ভিআইপি চ্যানেল:** {vip_status}\n"
         f"🔢 **আনলক লিমিট:** `{grp['required_count']} জন জয়েন`\n"
         f"👥 **মোট ট্র্যাক করা জয়েন:** `{total_refs} জন`\n"
+        f"🖼 **ভিজ্যুয়াল মোড:** `{photo_txt}`\n"
+        f"📝 **ক্যাপশন লেখা:** `{cap_txt}`\n"
         f"⏱ **অটো-রিপোস্ট টাইমার:** `{auto_txt}`\n"
-        f"📝 **বাংলা মেসেজ:** `{cap_txt}`\n"
-        f"🧹 **জয়েন/লিভ ক্লিনার:** `চালু ✅`\n"
         f"⚡ **স্ট্যাটাস:** `{active_txt}`"
     )
     toggle_label = "⏸ সিস্টেম বন্ধ" if grp["is_active"] else "▶️ সিস্টেম চালু"
     buttons = [
         [InlineKeyboardButton("🔐 ভিআইপি চ্যানেল/লিংক সেট করুন", callback_data=f"lp_setvip_{group_id}")],
-        [InlineKeyboardButton("✏️ মেসেজ টেক্সট বদলান", callback_data=f"lp_setmsg_{group_id}")],
+        [
+            InlineKeyboardButton("🖼 ছবি/ব্যানার সেট", callback_data=f"lp_setpic_{group_id}"),
+            InlineKeyboardButton("✏️ লেখা বদলান", callback_data=f"lp_setmsg_{group_id}"),
+        ],
         [
             InlineKeyboardButton("৩ জয়েন", callback_data=f"lp_cnt_{group_id}_3"),
             InlineKeyboardButton("৫ জয়েন", callback_data=f"lp_cnt_{group_id}_5"),
@@ -732,6 +789,36 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         await query.message.edit_text(text, reply_markup=buttons)
         await query.answer()
 
+    elif action == "setpic":
+        group_id = int(parts[2])
+        grp = get_group(group_id)
+        if not grp or grp["owner_user_id"] != user_id:
+            await query.answer("❌ অনুমতি নেই!", show_alert=True)
+            return
+        UNLOCK_STATES[user_id] = {"action": "waiting_photo", "group_id": group_id}
+        buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑 ছবি মুছে তালা-চাবি স্টিকার ব্যবহার করুন", callback_data=f"lp_resetpic_{group_id}")],
+            [InlineKeyboardButton("🔙 বাতিল", callback_data=f"lp_grp_{group_id}")],
+        ])
+        await query.message.edit_text(
+            "🖼 **এখন আপনার পছন্দের যেকোনো ১টি ছবি (Photo) বটে পাঠান:**\n\n"
+            "এই ছবির নিচেই বাংলা-ইংরেজি ক্যাপশন ও লাল-সবুজ কালারফুল বাটন একসাথে পোস্ট হবে!",
+            reply_markup=buttons,
+        )
+        await query.answer()
+
+    elif action == "resetpic":
+        group_id = int(parts[2])
+        grp = get_group(group_id)
+        if not grp or grp["owner_user_id"] != user_id:
+            await query.answer("❌ অনুমতি নেই!", show_alert=True)
+            return
+        UNLOCK_STATES.pop(user_id, None)
+        update_group_field(group_id, "custom_photo_id", None)
+        text, markup = render_group_dashboard(group_id)
+        await query.message.edit_text(text, reply_markup=markup)
+        await query.answer("✅ ছবি সরানো হয়েছে, এখন অটো স্টিকার ব্যবহার হবে!")
+
     elif action == "setmsg":
         group_id = int(parts[2])
         grp = get_group(group_id)
@@ -740,11 +827,11 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
             return
         UNLOCK_STATES[user_id] = {"action": "waiting_caption", "group_id": group_id}
         buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 ডিফল্ট বাংলা লেখা রাখুন", callback_data=f"lp_resetmsg_{group_id}")],
+            [InlineKeyboardButton("🔄 ডিফল্ট (বাংলা + ইংরেজি) রাখুন", callback_data=f"lp_resetmsg_{group_id}")],
             [InlineKeyboardButton("🔙 বাতিল", callback_data=f"lp_grp_{group_id}")],
         ])
         await query.message.edit_text(
-            "✏️ **গ্রুপে স্টিকারের উপরে যে বাংলা মেসেজটি দেখাবে, সেটি লিখে পাঠান:**",
+            "✏️ **গ্রুপে যে ক্যাপশন লেখাটি দেখাবে, সেটি লিখে পাঠান:**\n_(ছবি সেট থাকলে সর্বোচ্চ ৯৫০ অক্ষরের মধ্যে লিখবেন)_",
             reply_markup=buttons,
         )
         await query.answer()
@@ -759,7 +846,7 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         update_group_field(group_id, "custom_caption", None)
         text, markup = render_group_dashboard(group_id)
         await query.message.edit_text(text, reply_markup=markup)
-        await query.answer("✅ ডিফল্ট বাংলা মেসেজ রিসেট করা হয়েছে!")
+        await query.answer("✅ ডিফল্ট (বাংলা + ইংরেজি) ক্যাপশন রিসেট করা হয়েছে!")
 
     elif action == "cnt":
         group_id = int(parts[2])
@@ -810,7 +897,7 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         bot_username = await get_bot_username(client)
         try:
             await send_colorful_panel(client, group_id, bot_username)
-            await query.message.reply_text("✅ মেইন গ্রুপে বাংলা লেখা ও লক প্যানেল পোস্ট হয়েছে!")
+            await query.message.reply_text("✅ মেইন গ্রুপে আপনার নতুন লক প্যানেল পোস্ট হয়েছে!")
         except Exception as e:
             await query.message.reply_text(f"❌ পোস্ট করতে ব্যর্থ: `{e}`")
 
@@ -878,8 +965,8 @@ async def group_bindlock_cmd(client: Client, message: Message):
         pass
 
 
-# ==================== প্রাইভেট ইনপুট লিসেনার ====================
-@Client.on_message(filters.private & ~filters.command([]), group=3)
+# ==================== প্রাইভেট ইনপুট লিসেনার (group=1 যাতে downloader.py-এর সাথে কনফ্লিক্ট না হয়) ====================
+@Client.on_message(filters.private & ~filters.command([]), group=1)
 async def lockpanel_input_listener(client: Client, message: Message):
     ensure_auto_loop(client)
     if message.text and message.text.startswith("/"):
@@ -899,36 +986,37 @@ async def lockpanel_input_listener(client: Client, message: Message):
             parsed = parse_chat_input(message.text)
             if not parsed:
                 await message.reply_text("⚠️ ওই গ্রুপে গিয়ে `/bindlock` লিখুন অথবা বাটন দিয়ে গ্রুপ সিলেক্ট করুন।")
-                return
+                raise StopPropagation
             try:
                 target_chat = await client.get_chat(parsed)
             except Exception:
                 await message.reply_text("❌ গ্রুপটি খুঁজে পাওয়া যায়নি! আগে বটকে সেখানে Admin দিন।")
-                return
+                raise StopPropagation
 
         if not target_chat or target_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
             await message.reply_text("⚠️ ধাপ ১-এ শুধু আপনার **মেইন গ্রুপ** দিন (চ্যানেল নয়)। চ্যানেল পরের ধাপে দেবেন।")
-            return
+            raise StopPropagation
 
         try:
             member = await client.get_chat_member(target_chat.id, user_id)
             if member.status not in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
                 await message.reply_text("❌ আপনি এই গ্রুপের Admin নন!")
-                return
+                raise StopPropagation
             me = await client.get_me()
             bot_m = await client.get_chat_member(target_chat.id, me.id)
             if bot_m.status != ChatMemberStatus.ADMINISTRATOR or not (bot_m.privileges and bot_m.privileges.can_invite_users):
                 await message.reply_text("⚠️ বটকে গ্রুপে **Invite Users via Link** এবং **Delete Messages** পারমিশনসহ Admin বানান!")
-                return
+                raise StopPropagation
         except Exception as e:
             await message.reply_text(f"❌ যাচাই করা যায়নি: `{e}`")
-            return
+            raise StopPropagation
 
         save_group(target_chat.id, target_chat.title or "Main Group", user_id)
         UNLOCK_STATES[user_id] = {"action": "waiting_vip", "group_id": target_chat.id}
         bot_username = await get_bot_username(client)
         text, buttons = render_step2_vip_prompt(target_chat.id, target_chat.title or "Group", bot_username)
         await message.reply_text(text, reply_markup=buttons)
+        raise StopPropagation
 
     elif state["action"] == "waiting_vip":
         group_id = state["group_id"]
@@ -946,16 +1034,37 @@ async def lockpanel_input_listener(client: Client, message: Message):
 
         if not vip_val:
             await message.reply_text("⚠️ প্রাইভেট চ্যানেলের ইনভাইট লিংক (`https://t.me/+...`) পেস্ট করুন অথবা চ্যানেলের যেকোনো ১টি পোস্ট এখানে Forward করুন!")
-            return
+            raise StopPropagation
 
         await finish_vip_setup(client, user_id, group_id, vip_val)
+        raise StopPropagation
 
-    elif state["action"] == "waiting_caption" and message.text:
+    elif state["action"] == "waiting_photo":
+        if not message.photo:
+            await message.reply_text("⚠️ দয়া করে একটি **ছবি (Photo)** পাঠান!")
+            raise StopPropagation
         group_id = state["group_id"]
-        update_group_field(group_id, "custom_caption", message.text.strip())
+        photo_id = message.photo.file_id
+        update_group_field(group_id, "custom_photo_id", photo_id)
         UNLOCK_STATES.pop(user_id, None)
         text, markup = render_group_dashboard(group_id)
-        await message.reply_text(f"✅ **নতুন বাংলা মেসেজ সেট করা হয়েছে!**\n\n{text}", reply_markup=markup)
+        await message.reply_text(f"✅ **ব্যানার ছবি সেভ হয়েছে!** এবার '🚀 এখনই পোস্ট করুন' চাপুন।\n\n{text}", reply_markup=markup)
+        raise StopPropagation
+
+    elif state["action"] == "waiting_caption":
+        if not message.text:
+            await message.reply_text("⚠️ দয়া করে টেক্সট মেসেজ লিখে পাঠান!")
+            raise StopPropagation
+        cap = message.text.strip()
+        if len(cap) > 950:
+            await message.reply_text("⚠️ লেখাটি অনেক বড় (৯৫০ অক্ষরের মধ্যে লিখুন)।")
+            raise StopPropagation
+        group_id = state["group_id"]
+        update_group_field(group_id, "custom_caption", cap)
+        UNLOCK_STATES.pop(user_id, None)
+        text, markup = render_group_dashboard(group_id)
+        await message.reply_text(f"✅ **নতুন ক্যাপশন সেট করা হয়েছে!**\n\n{text}", reply_markup=markup)
+        raise StopPropagation
 
 
 # ==================== startgroup ব্যাকআপ বাইন্ডিং ====================
@@ -1049,14 +1158,23 @@ async def user_unlock_start(client: Client, message: Message):
         [InlineKeyboardButton(f"📤 গ্রুপে বা বন্ধুদের শেয়ার করুন ({count}/{required})", url=share_url)]
     ])
 
-    await message.reply_text(
+    dm_text = (
         f"🔒 **ভিডিও আনলক স্ট্যাটাস: {count}/{required}**\n\n"
         f"নিচের বাটনে চেপে আপনার এই লিংকটি যেকোনো **গ্রুপে বা বন্ধুদের ইনবক্সে** শেয়ার করুন।\n\n"
         f"🔗 আপনার ইউনিক শেয়ার লিংক:\n`{invite_link}`\n\n"
-        f"🔔 আপনার এই লিংক থেকে **{required} জন** জয়েন হওয়ার সাথে সাথেই আমি এই ইনবক্সে আপনাকে নোটিফিকেশন ও **প্রাইভেট চ্যানেলের লিংক** পাঠিয়ে দেবো!",
-        reply_markup=buttons,
-        disable_web_page_preview=True,
+        f"🔔 আপনার এই লিংক থেকে **{required} জন** জয়েন হওয়ার সাথে সাথেই আমি এই ইনবক্সে আপনাকে নোটিফিকেশন ও **প্রাইভেট চ্যানেলের লিংক** পাঠিয়ে দেবো!"
     )
+
+    if grp.get("custom_photo_id"):
+        try:
+            await message.reply_photo(photo=grp["custom_photo_id"], caption=dm_text, reply_markup=buttons)
+            raise StopPropagation
+        except StopPropagation:
+            raise
+        except Exception:
+            pass
+
+    await message.reply_text(dm_text, reply_markup=buttons, disable_web_page_preview=True)
     raise StopPropagation
 
 
@@ -1161,12 +1279,14 @@ async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpda
     if new_count >= required and not already_unlocked:
         mark_unlocked(update.chat.id, referrer_id)
 
-        # ১) গ্রুপে অভিনন্দন মেসেজ পাঠিয়ে ১০ সেকেন্ড পর অটো-ডিলিট (মূল প্যানেল স্থির থাকবে!)
+        # ১) ইউজারকে ক্লিকেবল মেনশন করে অভিনন্দন + ১০ সেকেন্ড পর অটো-ডিলিট
+        safe_name = html.escape(ref_name or "User")
+        mention = f'<a href="tg://user?id={referrer_id}">{safe_name}</a>'
         congrats_text = (
-            f"{ref_name} - 🎉 অভিনন্দন আপনি {required} জনকে শেয়ার করে ভিডিও আনলক করতে সফল হয়েছেন ✅"
+            f"{mention} - 🎉 অভিনন্দন আপনি {required} জনকে শেয়ার করে ভিডিও আনলক করতে সফল হয়েছেন ✅"
         )
         try:
-            c_msg = await client.send_message(update.chat.id, congrats_text)
+            c_msg = await client.send_message(update.chat.id, congrats_text, parse_mode=ParseMode.HTML)
             asyncio.create_task(delete_message_after(client, update.chat.id, c_msg.id, delay=10))
         except Exception as e:
             print(f"[Congrats Send Error]: {e}")
