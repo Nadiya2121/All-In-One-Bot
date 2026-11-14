@@ -1,9 +1,11 @@
 # plugins/downloader.py
 import os
+import re
 import shutil
 import time
 import asyncio
 import uuid
+from urllib.parse import urlparse
 import aiohttp
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -18,6 +20,13 @@ HELP = {
 TASKS = {}
 USER_STATES = {}
 
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+
+
 def humanbytes(size):
     if not size:
         return "0 B"
@@ -26,6 +35,7 @@ def humanbytes(size):
             break
         size /= 1024.0
     return f"{size:.2f} {unit}"
+
 
 def time_formatter(seconds):
     if not seconds or seconds <= 0:
@@ -39,11 +49,18 @@ def time_formatter(seconds):
     else:
         return f"{seconds}s"
 
+
 def get_progress_bar(current, total):
     percentage = (current / total) * 100 if total > 0 else 0
     filled = int(percentage // 10)
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] {percentage:.1f}%"
+
+
+def sanitize_filename(name: str) -> str:
+    name = re.sub(r'[\\/*?:"<>|]', "", name).strip()
+    return name or "video.mp4"
+
 
 def get_exact_duration(file_path):
     try:
@@ -57,20 +74,125 @@ def get_exact_duration(file_path):
         print(f"[Hachoir Duration Error]: {e}")
     return 0
 
-def run_yt_dlp(url: str, download_path: str, progress_hook):
-    ydl_opts = {
+
+def _build_ydl_opts(download_path: str, progress_hook, referer: str = "", use_impersonate: bool = False):
+    headers = {
+        'User-Agent': BROWSER_UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    if referer:
+        headers['Referer'] = referer
+
+    opts = {
         'format': 'best[ext=mp4]/best',
         'outtmpl': download_path,
         'max_filesize': 2000 * 1024 * 1024,
         'quiet': True,
         'no_warnings': True,
+        'nocheckcertificate': True,
+        'windowsfilenames': True,
         'progress_hooks': [progress_hook],
         'extractor_args': {'youtube': {'player_client': ['android', 'ios'], 'player_skip': ['webpage']}},
-        'http_headers': {'User-Agent': 'Mozilla/5.0'}
+        'http_headers': headers,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info), info.get('title', 'Video'), info.get('duration', 0)
+
+    if use_impersonate:
+        try:
+            import curl_cffi  # noqa: F401
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts['impersonate'] = ImpersonateTarget('chrome')
+        except Exception:
+            pass
+
+    return opts
+
+
+def run_yt_dlp(url: str, download_path: str, progress_hook):
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme and parsed.netloc else ""
+
+    def _extract(opts):
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filepath = None
+            req_dls = info.get('requested_downloads')
+            if req_dls and isinstance(req_dls, list):
+                filepath = req_dls[0].get('filepath')
+            if not filepath:
+                filepath = ydl.prepare_filename(info)
+            return filepath, info.get('title', 'Video'), info.get('duration', 0)
+
+    try:
+        opts = _build_ydl_opts(download_path, progress_hook, referer=origin, use_impersonate=False)
+        return _extract(opts)
+    except Exception as first_err:
+        if "403" in str(first_err):
+            # 403 এলে Referer ছাড়া এবং curl_cffi (থাকলে) সহ দ্বিতীয়বার চেষ্টা
+            opts_retry = _build_ydl_opts(download_path, progress_hook, referer="", use_impersonate=True)
+            return _extract(opts_retry)
+        raise
+
+
+async def aiohttp_direct_fallback(url: str, task_folder: str, status_msg: Message):
+    headers = {
+        "User-Agent": BROWSER_UA,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=60)
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        async with session.get(url, allow_redirects=True, ssl=False) as resp:
+            if resp.status != 200:
+                raise Exception(f"HTTP Error {resp.status}: {resp.reason}")
+
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            if "text/html" in content_type:
+                raise Exception("403 / HTML page returned instead of media file")
+
+            total = int(resp.headers.get("Content-Length") or 0)
+            if total > 2000 * 1024 * 1024:
+                raise Exception("File size exceeds 2000 MB limit")
+
+            filename = "video.mp4"
+            cd = resp.headers.get("Content-Disposition", "")
+            match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd, re.IGNORECASE)
+            if match:
+                filename = sanitize_filename(match.group(1))
+            else:
+                path_name = os.path.basename(urlparse(str(resp.url)).path)
+                if path_name and "." in path_name:
+                    filename = sanitize_filename(path_name)
+
+            if "." not in filename:
+                filename += ".mp4"
+
+            file_path = os.path.join(task_folder, filename)
+            downloaded = 0
+            start_time = time.time()
+            last_edit = 0
+
+            with open(file_path, "wb") as f:
+                async for chunk in resp.content.iter_chunked(1024 * 1024):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.time()
+                    if now - last_edit > 3:
+                        elapsed = max(now - start_time, 0.1)
+                        speed = downloaded / elapsed
+                        text = (
+                            f"📥 **ডাউনলোড হচ্ছে...**\n\n"
+                            f"{get_progress_bar(downloaded, total)}\n"
+                            f"⚡ **স্পিড:** {humanbytes(speed)}/s\n"
+                            f"💾 **সাইজ:** {humanbytes(downloaded)} / {humanbytes(total)}"
+                        )
+                        try:
+                            await status_msg.edit_text(text)
+                        except Exception:
+                            pass
+                        last_edit = now
+
+            return file_path, filename, 0
 
 
 @Client.on_message(filters.command("dl"))
@@ -86,14 +208,14 @@ async def media_downloader(client: Client, message: Message):
         return
 
     status_msg = await message.reply_text("⚡ **ডাউনলোড শুরু হচ্ছে...**")
-    
-    # 🔥 ফিক্স: ফাইলের নামের শুরুতে কোনো হিজিবিজি কোড না দিয়ে ইউনিক ফোল্ডারে রাখা হলো 🔥
+
     task_id = str(uuid.uuid4())[:8]
     task_folder = os.path.join("downloads", task_id)
     os.makedirs(task_folder, exist_ok=True)
 
-    temp_template = f"{task_folder}/%(title)s.%(ext)s"
+    temp_template = f"{task_folder}/%(title).80s.%(ext)s"
     last_edit = 0
+    loop = asyncio.get_running_loop()
 
     def progress_hook(d):
         nonlocal last_edit
@@ -110,15 +232,22 @@ async def media_downloader(client: Client, message: Message):
                     f"💾 **সাইজ:** {humanbytes(downloaded)} / {humanbytes(total)}"
                 )
                 try:
-                    asyncio.run_coroutine_threadsafe(status_msg.edit_text(text), client.loop)
+                    asyncio.run_coroutine_threadsafe(status_msg.edit_text(text), loop)
                 except Exception:
                     pass
                 last_edit = now
 
     try:
-        loop = asyncio.get_running_loop()
-        file_path, title, duration = await loop.run_in_executor(None, run_yt_dlp, url, temp_template, progress_hook)
-        
+        try:
+            file_path, title, duration = await loop.run_in_executor(
+                None, run_yt_dlp, url, temp_template, progress_hook
+            )
+        except Exception as ytdlp_err:
+            if "403" in str(ytdlp_err):
+                file_path, title, duration = await aiohttp_direct_fallback(url, task_folder, status_msg)
+            else:
+                raise ytdlp_err
+
         exact_dur = get_exact_duration(file_path)
         if exact_dur > 0:
             duration = exact_dur
@@ -159,7 +288,16 @@ async def media_downloader(client: Client, message: Message):
         await status_msg.edit_text(caption, reply_markup=buttons)
 
     except Exception as e:
-        await status_msg.edit_text("❌ ডাউনলোড ব্যর্থ হয়েছে! লিংক সঠিক কিনা যাচাই করুন।")
+        if os.path.exists(task_folder):
+            shutil.rmtree(task_folder, ignore_errors=True)
+        err_str = str(e)
+        if "403" in err_str:
+            await status_msg.edit_text(
+                "❌ **ডাউনলোড ব্যর্থ হয়েছে (403 Forbidden)!**\n"
+                "সার্ভারটি ক্লাউড IP বা এই টোকেন লিংক ব্লক করেছে।"
+            )
+        else:
+            await status_msg.edit_text("❌ ডাউনলোড ব্যর্থ হয়েছে! লিংক সঠিক কিনা যাচাই করুন।")
         print(f"[DL Error]: {e}")
 
 
@@ -191,8 +329,9 @@ async def button_handler(client: Client, query: CallbackQuery):
     elif action == "upload":
         await query.answer("🚀 আপলোড শুরু হচ্ছে...")
         USER_STATES.pop(query.from_user.id, None)
-        
+
         last_edit = 0
+
         async def upload_progress(current, total):
             nonlocal last_edit
             now = time.time()
@@ -222,7 +361,6 @@ async def button_handler(client: Client, query: CallbackQuery):
                 f"🤖 Powered by **OmniCore**"
             )
 
-            # টেলিগ্রামে ফাইল আপলোড
             await query.message.reply_video(
                 video=task["file_path"],
                 caption=caption,
@@ -235,7 +373,6 @@ async def button_handler(client: Client, query: CallbackQuery):
         except Exception as e:
             await query.message.edit_text(f"❌ আপলোডে সমস্যা হয়েছে: {e}")
         finally:
-            # কাজ শেষে টাস্ক ফোল্ডার পুরোপুরি ডিলিট করে মেমোরি খালি করা
             if os.path.exists(task["folder"]):
                 shutil.rmtree(task["folder"], ignore_errors=True)
             TASKS.pop(task_id, None)
@@ -256,13 +393,11 @@ async def input_listener(client: Client, message: Message):
         USER_STATES.pop(message.from_user.id, None)
         raise ContinuePropagation
 
-    # রিনেম করার সময় কোনো হিজিবিজি কোড না দিয়ে একদম ফ্রেশ নাম রাখা হচ্ছে
     if state["action"] == "waiting_rename" and message.text:
-        new_name = message.text.strip()
-        if not new_name.endswith(".mp4"):
+        new_name = sanitize_filename(message.text.strip())
+        if not new_name.lower().endswith((".mp4", ".mkv", ".webm")):
             new_name += ".mp4"
-        
-        # 🔥 ফিক্স: নামের সাথে কোনো কোড নেই, শুধু পরিষ্কার নাম 🔥
+
         new_path = os.path.join(task["folder"], new_name)
         os.rename(task["file_path"], new_path)
         task["file_path"] = new_path
@@ -279,6 +414,6 @@ async def input_listener(client: Client, message: Message):
         thumb_path = os.path.join(task["folder"], "thumb.jpg")
         await message.download(file_name=thumb_path)
         task["thumb"] = thumb_path
-        
+
         USER_STATES.pop(message.from_user.id, None)
         await message.reply_text("✅ কাস্টম থাম্বনেইল সেট করা হয়েছে!\nএখন আগের মেন্যুতে গিয়ে **Done** চাপুন।")
