@@ -18,14 +18,13 @@ from pyrogram.types import (
 )
 
 HELP = {
-    "lockpanel": "মেইন গ্রুপ ও প্রাইভেট চ্যানেলের সম্পূর্ণ বাংলা অটো-পাইলট আনলক ড্যাশবোর্ড",
+    "lockpanel": "মেইন গ্রুপ ও প্রাইভেট চ্যানেলের সম্পূর্ণ বাংলা আনলক ড্যাশবোর্ড",
     "bindlock": "বট আগে থেকেই গ্রুপে Admin থাকলে গ্রুপে এই কমান্ড দিয়ে কানেক্ট করুন",
 }
 
 DB_PATH = "unlock_system.db"
 UNLOCK_STATES = {}
 LAST_PANEL_TIME = {}
-MSG_COUNTERS = {}
 BOT_USERNAME_CACHE = None
 AUTO_LOOP_STARTED = False
 
@@ -49,7 +48,7 @@ def init_db():
             required_count INTEGER DEFAULT 3,
             last_msg_id INTEGER DEFAULT 0,
             last_text_id INTEGER DEFAULT 0,
-            auto_minutes INTEGER DEFAULT 10,
+            auto_minutes INTEGER DEFAULT 0,
             is_active INTEGER DEFAULT 1,
             main_invite_link TEXT,
             custom_caption TEXT
@@ -58,7 +57,7 @@ def init_db():
     for col_sql in [
         "ALTER TABLE groups ADD COLUMN last_msg_id INTEGER DEFAULT 0",
         "ALTER TABLE groups ADD COLUMN last_text_id INTEGER DEFAULT 0",
-        "ALTER TABLE groups ADD COLUMN auto_minutes INTEGER DEFAULT 10",
+        "ALTER TABLE groups ADD COLUMN auto_minutes INTEGER DEFAULT 0",
         "ALTER TABLE groups ADD COLUMN is_active INTEGER DEFAULT 1",
         "ALTER TABLE groups ADD COLUMN main_invite_link TEXT",
         "ALTER TABLE groups ADD COLUMN custom_caption TEXT",
@@ -124,7 +123,7 @@ def save_group(group_id: int, title: str, owner_user_id: int):
         )
     else:
         c.execute(
-            "INSERT INTO groups (group_id, group_title, owner_user_id, vip_target, required_count, last_msg_id, last_text_id, auto_minutes, is_active, main_invite_link, custom_caption) VALUES (?, ?, ?, NULL, 3, 0, 0, 10, 1, NULL, NULL)",
+            "INSERT INTO groups (group_id, group_title, owner_user_id, vip_target, required_count, last_msg_id, last_text_id, auto_minutes, is_active, main_invite_link, custom_caption) VALUES (?, ?, ?, NULL, 3, 0, 0, 0, 1, NULL, NULL)",
             (group_id, title, owner_user_id),
         )
     conn.commit()
@@ -149,7 +148,7 @@ def get_group(group_id: int):
             "required_count": row[4],
             "last_msg_id": row[5] or 0,
             "last_text_id": row[6] or 0,
-            "auto_minutes": row[7] if row[7] is not None else 10,
+            "auto_minutes": row[7] if row[7] is not None else 0,
             "is_active": bool(row[8] if row[8] is not None else 1),
             "main_invite_link": row[9],
             "custom_caption": row[10],
@@ -181,7 +180,7 @@ def get_user_groups(owner_user_id: int):
             "title": r[1],
             "vip_target": r[2],
             "required_count": r[3],
-            "auto_minutes": r[4] if r[4] is not None else 10,
+            "auto_minutes": r[4] if r[4] is not None else 0,
             "is_active": bool(r[5] if r[5] is not None else 1),
         }
         for r in rows
@@ -413,25 +412,14 @@ def get_default_bangla_caption(required: int) -> str:
     )
 
 
-async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, congrats_text: str = None, force: bool = False):
-    now = time.time()
-    if not force and (now - LAST_PANEL_TIME.get(chat_id, 0) < 3):
-        return
-    LAST_PANEL_TIME[chat_id] = now
+async def send_colorful_panel(client: Client, chat_id: int, bot_username: str):
+    LAST_PANEL_TIME[chat_id] = time.time()
 
     grp = get_group(chat_id)
     if not grp:
         return
 
-    # ১) অভিনন্দন মেসেজ থাকলে ১০ সেকেন্ড পর অটো-ডিলিট
-    if congrats_text:
-        try:
-            c_msg = await client.send_message(chat_id, congrats_text)
-            asyncio.create_task(delete_message_after(client, chat_id, c_msg.id, delay=10))
-        except Exception as e:
-            print(f"[Congrats Send Error]: {e}")
-
-    # ২) আগের পুরোনো বাংলা লেখা ও স্টিকার ডিলিট করা
+    # আগের পুরোনো বাংলা লেখা ও স্টিকার ডিলিট করা (শুধু নতুন প্যানেল পোস্ট করার সময়)
     to_delete = []
     if grp.get("last_text_id"):
         to_delete.append(grp["last_text_id"])
@@ -461,12 +449,12 @@ async def send_colorful_panel(client: Client, chat_id: int, bot_username: str, c
             {
                 "text": f"📤 {required} জনকে শেয়ার করুন",
                 "url": personal_share_url,
-                "style": "danger",  # লাল বাটন -> নিজস্ব পার্সোনাল লিংক দেবে
+                "style": "danger",
             },
             {
                 "text": "🔓 ভিডিও দেখুন",
                 "callback_data": f"lp_chk_{chat_id}",
-                "style": "success",  # সবুজ বাটন -> গ্রুপেই পপআপ চেক
+                "style": "success",
             },
         ]
     ]
@@ -535,7 +523,7 @@ async def generate_vip_link(client: Client, vip_target: str) -> str:
         return None
 
 
-# ==================== ব্যাকগ্রাউন্ড অটো-পোস্টার লুপ ====================
+# ==================== ব্যাকগ্রাউন্ড অটো-পোস্টার লুপ (ঐচ্ছিক টাইমার অন থাকলে) ====================
 async def auto_poster_loop(client: Client):
     while True:
         await asyncio.sleep(60)
@@ -548,7 +536,7 @@ async def auto_poster_loop(client: Client):
                 prev = LAST_PANEL_TIME.get(group_id, 0)
                 if now - prev >= (auto_mins * 60):
                     try:
-                        await send_colorful_panel(client, group_id, bot_username, force=True)
+                        await send_colorful_panel(client, group_id, bot_username)
                     except Exception as e:
                         print(f"[Auto Poster Error for {group_id}]: {e}")
         except Exception as loop_err:
@@ -601,8 +589,8 @@ def render_group_dashboard(group_id: int):
         return "❌ তথ্য খুঁজে পাওয়া যায়নি!", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ফিরে যান", callback_data="lp_home")]])
 
     vip_status = f"`{grp['vip_target']}`" if grp["vip_target"] else "❌ সেট করা হয়নি"
-    auto_txt = f"প্রতি {grp['auto_minutes']} মিনিট পর পর" if grp["auto_minutes"] > 0 else "বন্ধ (শুধু নতুন মেম্বার এলে)"
-    active_txt = "✅ চালু (Auto-Pilot)" if grp["is_active"] else "⏸ বিরতিতে"
+    auto_txt = f"প্রতি {grp['auto_minutes']} মিনিট পর পর" if grp["auto_minutes"] > 0 else "বন্ধ (প্যানেল স্থির থাকবে ✅)"
+    active_txt = "✅ চালু" if grp["is_active"] else "⏸ বিরতিতে"
     cap_txt = "কাস্টম সেট করা আছে ✅" if grp.get("custom_caption") else "ডিফল্ট বাংলা মেসেজ ✅"
     total_refs = get_group_total_referrals(group_id)
 
@@ -612,11 +600,12 @@ def render_group_dashboard(group_id: int):
         f"🔐 **ভিআইপি চ্যানেল:** {vip_status}\n"
         f"🔢 **আনলক লিমিট:** `{grp['required_count']} জন জয়েন`\n"
         f"👥 **মোট ট্র্যাক করা জয়েন:** `{total_refs} জন`\n"
-        f"⏱ **অটো প্যানেল পোস্ট:** `{auto_txt}`\n"
+        f"⏱ **অটো-রিপোস্ট টাইমার:** `{auto_txt}`\n"
         f"📝 **বাংলা মেসেজ:** `{cap_txt}`\n"
+        f"🧹 **জয়েন/লিভ ক্লিনার:** `চালু ✅`\n"
         f"⚡ **স্ট্যাটাস:** `{active_txt}`"
     )
-    toggle_label = "⏸ অটো বন্ধ" if grp["is_active"] else "▶️ অটো চালু"
+    toggle_label = "⏸ সিস্টেম বন্ধ" if grp["is_active"] else "▶️ সিস্টেম চালু"
     buttons = [
         [InlineKeyboardButton("🔐 ভিআইপি চ্যানেল/লিংক সেট করুন", callback_data=f"lp_setvip_{group_id}")],
         [InlineKeyboardButton("✏️ মেসেজ টেক্সট বদলান", callback_data=f"lp_setmsg_{group_id}")],
@@ -626,10 +615,10 @@ def render_group_dashboard(group_id: int):
             InlineKeyboardButton("১০ জয়েন", callback_data=f"lp_cnt_{group_id}_10"),
         ],
         [
-            InlineKeyboardButton("⏱ ৫মি", callback_data=f"lp_tm_{group_id}_5"),
             InlineKeyboardButton("⏱ ১০মি", callback_data=f"lp_tm_{group_id}_10"),
             InlineKeyboardButton("⏱ ৩০মি", callback_data=f"lp_tm_{group_id}_30"),
-            InlineKeyboardButton("অফ", callback_data=f"lp_tm_{group_id}_0"),
+            InlineKeyboardButton("⏱ ১ঘণ্টা", callback_data=f"lp_tm_{group_id}_60"),
+            InlineKeyboardButton("স্থির (অফ)", callback_data=f"lp_tm_{group_id}_0"),
         ],
         [
             InlineKeyboardButton("🚀 এখনই পোস্ট করুন", callback_data=f"lp_post_{group_id}"),
@@ -794,7 +783,7 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         update_group_field(group_id, "auto_minutes", mins)
         text, markup = render_group_dashboard(group_id)
         await query.message.edit_text(text, reply_markup=markup)
-        await query.answer(f"✅ অটো-পোস্ট সময় {mins} মিনিট সেট হয়েছে!" if mins > 0 else "✅ টাইমার বন্ধ হয়েছে")
+        await query.answer(f"✅ অটো-পোস্ট সময় {mins} মিনিট সেট হয়েছে!" if mins > 0 else "✅ প্যানেল এখন গ্রুপে স্থির থাকবে!")
 
     elif action == "tog":
         group_id = int(parts[2])
@@ -806,7 +795,7 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         update_group_field(group_id, "is_active", new_state)
         text, markup = render_group_dashboard(group_id)
         await query.message.edit_text(text, reply_markup=markup)
-        await query.answer("✅ অটো-পাইলট চালু হয়েছে!" if new_state else "⏸ অটো-পাইলট বন্ধ হয়েছে!")
+        await query.answer("✅ সিস্টেম চালু হয়েছে!" if new_state else "⏸ সিস্টেম বন্ধ হয়েছে!")
 
     elif action == "post":
         group_id = int(parts[2])
@@ -820,7 +809,7 @@ async def lockpanel_callback_handler(client: Client, query: CallbackQuery):
         await query.answer("🚀 প্যানেল পোস্ট করা হচ্ছে...")
         bot_username = await get_bot_username(client)
         try:
-            await send_colorful_panel(client, group_id, bot_username, force=True)
+            await send_colorful_panel(client, group_id, bot_username)
             await query.message.reply_text("✅ মেইন গ্রুপে বাংলা লেখা ও লক প্যানেল পোস্ট হয়েছে!")
         except Exception as e:
             await query.message.reply_text(f"❌ পোস্ট করতে ব্যর্থ: `{e}`")
@@ -845,8 +834,8 @@ async def finish_vip_setup(client: Client, user_id: int, group_id: int, vip_val:
 
     bot_username = await get_bot_username(client)
     try:
-        await send_colorful_panel(client, group_id, bot_username, force=True)
-        auto_msg = "🚀 আপনার মেইন গ্রুপে এখনই লক প্যানেল পোস্ট করা হয়েছে এবং অটো-পাইলট চালু হয়ে গেছে!"
+        await send_colorful_panel(client, group_id, bot_username)
+        auto_msg = "🚀 আপনার মেইন গ্রুপে এখনই লক প্যানেল পোস্ট করা হয়েছে!"
     except Exception as e:
         auto_msg = f"⚠️ সেভ হয়েছে, তবে মেইন গ্রুপে পোস্ট করতে সমস্যা হয়েছে (`{e}`)"
 
@@ -1026,7 +1015,6 @@ async def user_unlock_start(client: Client, message: Message):
     u_data = get_group_user(group_id, user.id)
 
     if not u_data or not u_data["invite_link"]:
-        # রিস্টার্ট হলেও ইউজার আইডি রিকভার করার জন্য কোডে user.id রাখা
         invite_code = f"r_{user.id}_{abs(group_id) % 100000}"
         try:
             inv = await client.create_chat_invite_link(chat_id=group_id, name=invite_code)
@@ -1072,23 +1060,20 @@ async def user_unlock_start(client: Client, message: Message):
     raise StopPropagation
 
 
-# ==================== গ্রুপের অ্যাক্টিভিটি কাউন্টার ====================
-@Client.on_message(filters.group, group=10)
-async def group_activity_lock_trigger(client: Client, message: Message):
+# ==================== জয়েন/লিভ সার্ভিস মেসেজ অটো-ক্লিনার ====================
+@Client.on_message(filters.group & (filters.new_chat_members | filters.left_chat_member), group=9)
+async def clean_join_leave_service_msgs(client: Client, message: Message):
     ensure_auto_loop(client)
     grp = get_group(message.chat.id)
-    if grp and grp["is_active"] and grp["vip_target"]:
-        cnt = MSG_COUNTERS.get(message.chat.id, 0) + 1
-        if cnt >= 10:
-            MSG_COUNTERS[message.chat.id] = 0
-            bot_username = await get_bot_username(client)
-            await send_colorful_panel(client, message.chat.id, bot_username)
-        else:
-            MSG_COUNTERS[message.chat.id] = cnt
+    if grp and grp["is_active"]:
+        try:
+            await message.delete()
+        except Exception:
+            pass
     raise ContinuePropagation
 
 
-# ==================== অটো বাইন্ডিং, নতুন মেম্বার লক ও রেফারেল ট্র্যাকার ====================
+# ==================== অটো বাইন্ডিং ও রেফারেল ট্র্যাকার ====================
 @Client.on_chat_member_updated()
 async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpdated):
     ensure_auto_loop(client)
@@ -1143,73 +1128,77 @@ async def unified_member_and_bind_tracker(client: Client, update: ChatMemberUpda
     if was_member or not is_now_member:
         return
 
-    bot_username = await get_bot_username(client)
-    unlocked_now = False
-
     inv = update.invite_link
-    if inv:
-        inv_code = getattr(inv, "name", None)
-        inv_url = getattr(inv, "invite_link", None)
-        referrer_id = find_referrer(update.chat.id, invite_code=inv_code, invite_url=inv_url)
+    if not inv:
+        return
 
-        # যদি DB রিসেট হয়ে গিয়ে থাকে, তবুও লিংকের নাম (r_USERID_...) থেকে রিকভার করা!
-        if not referrer_id and inv_code and inv_code.startswith("r_"):
-            parts = inv_code.split("_")
-            if len(parts) >= 2 and parts[1].isdigit():
-                referrer_id = int(parts[1])
-                if not get_group_user(update.chat.id, referrer_id):
-                    try:
-                        u_obj = await client.get_users(referrer_id)
-                        u_name = u_obj.first_name
-                    except Exception:
-                        u_name = "User"
-                    upsert_group_user(update.chat.id, referrer_id, u_name, inv_url or "", inv_code)
+    inv_code = getattr(inv, "name", None)
+    inv_url = getattr(inv, "invite_link", None)
+    referrer_id = find_referrer(update.chat.id, invite_code=inv_code, invite_url=inv_url)
 
-        if referrer_id:
-            result = add_referral(update.chat.id, new_m.user.id, referrer_id)
-            if result:
-                new_count, already_unlocked, ref_name = result
-                required = grp["required_count"]
+    if not referrer_id and inv_code and inv_code.startswith("r_"):
+        parts = inv_code.split("_")
+        if len(parts) >= 2 and parts[1].isdigit():
+            referrer_id = int(parts[1])
+            if not get_group_user(update.chat.id, referrer_id):
+                try:
+                    u_obj = await client.get_users(referrer_id)
+                    u_name = u_obj.first_name
+                except Exception:
+                    u_name = "User"
+                upsert_group_user(update.chat.id, referrer_id, u_name, inv_url or "", inv_code)
 
-                if new_count >= required and not already_unlocked:
-                    unlocked_now = True
-                    mark_unlocked(update.chat.id, referrer_id)
+    if not referrer_id:
+        return
 
-                    congrats_text = (
-                        f"{ref_name} - 🎉 অভিনন্দন আপনি {required} জনকে শেয়ার করে ভিডিও আনলক করতে সফল হয়েছেন ✅"
-                    )
-                    await send_colorful_panel(client, update.chat.id, bot_username, congrats_text=congrats_text, force=True)
+    result = add_referral(update.chat.id, new_m.user.id, referrer_id)
+    if not result:
+        return
 
-                    vip_link = await generate_vip_link(client, grp["vip_target"])
-                    if vip_link:
-                        try:
-                            btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 প্রাইভেট ভিডিও দেখুন", url=vip_link)]])
-                            await client.send_message(
-                                chat_id=referrer_id,
-                                text=(
-                                    f"🎉 **অভিনন্দন {ref_name}!**\n\n"
-                                    f"আপনার লিংক থেকে {required} জন জয়েন সম্পন্ন হয়েছে এবং আপনার ভিডিও আনলক হয়েছে ✅\n"
-                                    f"নিচের বাটনে ক্লিক করে প্রাইভেট ভিডিও চ্যানেলে জয়েন করুন:"
-                                ),
-                                reply_markup=btn,
-                            )
-                        except Exception as dm_err:
-                            print(f"[DM Send Error for {referrer_id}]: {dm_err}")
+    new_count, already_unlocked, ref_name = result
+    required = grp["required_count"]
 
-                elif new_count < required:
-                    remaining = required - new_count
-                    try:
-                        await client.send_message(
-                            chat_id=referrer_id,
-                            text=(
-                                f"🔔 **নতুন জয়েন নোটিফিকেশন!**\n\n"
-                                f"আপনার শেয়ার লিংক থেকে ১ জন নতুন মেম্বার জয়েন হয়েছে! ✅\n"
-                                f"📊 **বর্তমান প্রোগ্রেস:** `{new_count}/{required}`\n"
-                                f"⏳ আর মাত্র **{remaining} জন** জয়েন হলেই আপনার প্রাইভেট চ্যানেল আনলক হয়ে যাবে!"
-                            ),
-                        )
-                    except Exception:
-                        pass
+    if new_count >= required and not already_unlocked:
+        mark_unlocked(update.chat.id, referrer_id)
 
-    if not unlocked_now:
-        await send_colorful_panel(client, update.chat.id, bot_username)
+        # ১) গ্রুপে অভিনন্দন মেসেজ পাঠিয়ে ১০ সেকেন্ড পর অটো-ডিলিট (মূল প্যানেল স্থির থাকবে!)
+        congrats_text = (
+            f"{ref_name} - 🎉 অভিনন্দন আপনি {required} জনকে শেয়ার করে ভিডিও আনলক করতে সফল হয়েছেন ✅"
+        )
+        try:
+            c_msg = await client.send_message(update.chat.id, congrats_text)
+            asyncio.create_task(delete_message_after(client, update.chat.id, c_msg.id, delay=10))
+        except Exception as e:
+            print(f"[Congrats Send Error]: {e}")
+
+        # ২) ইউজারের ইনবক্সে আনলক নোটিফিকেশন ও প্রাইভেট চ্যানেলের লিংক
+        vip_link = await generate_vip_link(client, grp["vip_target"])
+        if vip_link:
+            try:
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 প্রাইভেট ভিডিও দেখুন", url=vip_link)]])
+                await client.send_message(
+                    chat_id=referrer_id,
+                    text=(
+                        f"🎉 **অভিনন্দন {ref_name}!**\n\n"
+                        f"আপনার লিংক থেকে {required} জন জয়েন সম্পন্ন হয়েছে এবং আপনার ভিডিও আনলক হয়েছে ✅\n"
+                        f"নিচের বাটনে ক্লিক করে প্রাইভেট ভিডিও চ্যানেলে জয়েন করুন:"
+                    ),
+                    reply_markup=btn,
+                )
+            except Exception as dm_err:
+                print(f"[DM Send Error for {referrer_id}]: {dm_err}")
+
+    elif new_count < required:
+        remaining = required - new_count
+        try:
+            await client.send_message(
+                chat_id=referrer_id,
+                text=(
+                    f"🔔 **নতুন জয়েন নোটিফিকেশন!**\n\n"
+                    f"আপনার শেয়ার লিংক থেকে ১ জন নতুন মেম্বার জয়েন হয়েছে! ✅\n"
+                    f"📊 **বর্তমান প্রোগ্রেস:** `{new_count}/{required}`\n"
+                    f"⏳ আর মাত্র **{remaining} জন** জয়েন হলেই আপনার প্রাইভেট চ্যানেল আনলক হয়ে যাবে!"
+                ),
+            )
+        except Exception:
+            pass
