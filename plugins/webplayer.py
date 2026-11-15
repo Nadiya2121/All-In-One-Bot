@@ -7,9 +7,11 @@ import time
 import uuid
 import asyncio
 import aiohttp
+from urllib.parse import quote
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.enums import ParseMode
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+import config
 from config import APP_URL
 from main import db
 
@@ -59,23 +61,31 @@ async def get_api_credentials():
                 return doc.get("login"), doc.get("key")
         except Exception:
             pass
-    return None, None
+    return (
+        getattr(config, "STREAMTAPE_LOGIN", None),
+        getattr(config, "STREAMTAPE_KEY", None)
+    )
 
 
 async def get_tmdb_key():
     if db is not None:
         try:
             doc = await db.settings.find_one({"_id": "tmdb"})
-            if doc:
+            if doc and doc.get("api_key"):
                 return doc.get("api_key")
         except Exception:
             pass
-    return os.environ.get("TMDB_API_KEY")
+    for attr in ("TMDB_API_KEY", "TMDB_KEY", "TMDB_API"):
+        val = getattr(config, attr, None) or os.environ.get(attr)
+        if val:
+            return str(val).strip()
+    return None
 
 
 async def fetch_tmdb_data(query_text: str, api_key: str):
     if not api_key:
-        return None
+        return None, "TMDB API Key পাওয়া যায়নি!"
+
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         media_type = "movie"
@@ -89,21 +99,42 @@ async def fetch_tmdb_data(query_text: str, api_key: str):
         if clean_q.isdigit():
             tmdb_id = clean_q
         else:
-            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={api_key}&query={aiohttp.helpers.quote(clean_q)}"
+            year_match = re.search(r'\b(19\d{2}|20\d{2})\b', clean_q)
+            search_q = re.sub(r'[\(\[]?(19\d{2}|20\d{2})[\)\]]?', '', clean_q).strip()
+            if not search_q:
+                search_q = clean_q
+
+            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={api_key}&query={quote(search_q)}"
             async with session.get(search_url) as resp:
+                if resp.status == 401:
+                    return None, "TMDB API Key ভুল বা ইনভ্যালিড!"
                 if resp.status != 200:
-                    return None
+                    return None, f"TMDB সার্চ এরর (Status {resp.status})"
                 sdata = await resp.json()
                 results = [r for r in sdata.get("results", []) if r.get("media_type") in ("movie", "tv")]
                 if not results:
-                    return None
-                media_type = results[0].get("media_type", "movie")
-                tmdb_id = results[0].get("id")
+                    return None, f"'{search_q}' নামে TMDB-তে কোনো মুভি পাওয়া যায়নি!"
 
-        detail_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={api_key}&append_to_response=credits,videos,images"
+                # Year match priority if year was given
+                chosen = results[0]
+                if year_match:
+                    yr = year_match.group(1)
+                    for r in results:
+                        rd = r.get("release_date") or r.get("first_air_date") or ""
+                        if rd.startswith(yr):
+                            chosen = r
+                            break
+
+                media_type = chosen.get("media_type", "movie")
+                tmdb_id = chosen.get("id")
+
+        detail_url = (
+            f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}"
+            f"?api_key={api_key}&append_to_response=credits,videos,images&include_image_language=en,null"
+        )
         async with session.get(detail_url) as resp:
             if resp.status != 200:
-                return None
+                return None, f"TMDB ডিটেলস লোড হয়নি (Status {resp.status})"
             d = await resp.json()
 
         title = d.get("title") or d.get("name") or clean_q
@@ -143,7 +174,7 @@ async def fetch_tmdb_data(query_text: str, api_key: str):
             "screenshots": screenshots,
             "trailer_id": trailer_id,
             "language": "Hindi Dubbed / Dual Audio"
-        }
+        }, None
 
 
 async def upload_to_streamtape(file_path, file_name, api_login, api_key):
@@ -208,7 +239,7 @@ async def generate_and_send_post(client: Client, message: Message, task_id: str,
         base_url = f"https://{base_url}"
 
     title = html.escape(task.get("title", "Untitled Movie"))
-    poster_url = task.get("poster_url", "https://via.placeholder.com/300x450/151924/9ca3af?text=No+Poster")
+    poster_url = task.get("poster_url") or "https://via.placeholder.com/300x450/151924/9ca3af?text=No+Poster"
     language = html.escape(task.get("language", "Dual Audio"))
     genre = html.escape(task.get("genre", "Movie"))
     rating = html.escape(str(task.get("rating", "N/A")))
@@ -219,7 +250,6 @@ async def generate_and_send_post(client: Client, message: Message, task_id: str,
     trailer_id = task.get("trailer_id", "")
     screenshots = task.get("screenshots", [])
 
-    # Trailer HTML (Only if available)
     trailer_html = ""
     if trailer_id:
         trailer_html = (
@@ -229,13 +259,11 @@ async def generate_and_send_post(client: Client, message: Message, task_id: str,
             '</div>\n'
         )
 
-    # Screenshots HTML (Only if available)
     ss_html = ""
     if screenshots:
         ss_imgs = "".join([f'<img src="{s}" alt="{title} Screenshot" loading="lazy"/>' for s in screenshots])
         ss_html = f'<h3>&#128248; Screenshots</h3>\n<div class="screenshots-grid">{ss_imgs}</div>\n'
 
-    # Embed Player Section (Inside .download-box so it unlocks after 8s Timer!)
     embed_section_html = ""
     embeds = task.get("embeds", [])
     if embeds:
@@ -254,7 +282,6 @@ async def generate_and_send_post(client: Client, message: Message, task_id: str,
             '</div>\n'
         )
 
-    # Unlimited Telegram Download Buttons
     dl_section_html = ""
     downloads = task.get("downloads", [])
     if downloads:
@@ -272,7 +299,6 @@ async def generate_and_send_post(client: Client, message: Message, task_id: str,
             f'<div class="dl-buttons">\n{btns_html}</div>\n'
         )
 
-    # Original Blogger Theme Post Format
     blogger_html = (
         f'<div class="movie-hero-box">\n'
         f'  <div class="movie-hero-poster"><img src="{poster_url}" alt="{title}"/></div>\n'
@@ -377,7 +403,7 @@ async def deliver_telegram_file(client: Client, message: Message):
         asyncio.create_task(auto_delete_task(client, message.chat.id, [sent_msg.id], delay=300))
 
 
-# ----------------- [ ২. সেটিংস কমান্ড (Streamtape & TMDB) ] -----------------
+# ----------------- [ ২. সেটিংস কমান্ড ] -----------------
 
 @Client.on_message(filters.command("set_player") & filters.private)
 async def set_player_creds(client: Client, message: Message):
@@ -420,7 +446,7 @@ async def check_player_creds(client: Client, message: Message):
     await message.reply_text(f"⚙️ **সেটিংস স্ট্যাটাস:**\n🎬 **Streamtape:** {st_status}\n🎞 **TMDB API:** {tm_status}")
 
 
-# ----------------- [ ৩. নতুন পোস্ট শুরু (/post বা ভিডিওতে /player) ] -----------------
+# ----------------- [ ৩. নতুন পোস্ট শুরু (/post বা /player) ] -----------------
 
 @Client.on_message(filters.command("post") & filters.private)
 async def start_new_post_wizard(client: Client, message: Message):
@@ -428,7 +454,7 @@ async def start_new_post_wizard(client: Client, message: Message):
     BLOGGER_TASKS[task_id] = {"embeds": [], "downloads": []}
     await message.reply_text(
         "🎬 **নতুন মুভি পোস্ট তৈরি শুরু হয়েছে!**\n\n"
-        "নিচে থেকে আপনার পছন্দমতো Embed ভিডিও বা Telegram ফাইল (ডাউনলোড বাটন) যোগ করুন, এরপর **Generate Blogger Post** চাপুন:",
+        "প্রথমে Embed ভিডিও বা Telegram ডাউনলোড ফাইল যোগ করুন, এরপর **Generate Blogger Post** চাপুন (TMDB অটোমেটিক সব তথ্য পূরণ করে দেবে):",
         reply_markup=build_control_keyboard(task_id, BLOGGER_TASKS[task_id])
     )
 
@@ -547,15 +573,18 @@ async def blogger_button_actions(client: Client, query: CallbackQuery):
         tmdb_key = await get_tmdb_key()
         if tmdb_key:
             BLOGGER_STATES[user_id] = {"task_id": task_id, "step": "waiting_tmdb"}
-            skip_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Skip TMDB (Manual Title & Poster)", callback_data=f"wp_tmdb_skip|{task_id}")]])
+            skip_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Manual Title & Poster (If not on TMDB)", callback_data=f"wp_tmdb_skip|{task_id}")]])
             await query.message.reply_text(
-                "🎞 **মুভির নাম বা TMDB ID লিখে পাঠান** (যেমন: `RRR` বা `579974`, সিরিজ হলে `tv:12345`):\n"
-                "অথবা নিচের Skip বাটনে চাপ দিয়ে ম্যানুয়ালি টাইটেল ও ছবি দিন।",
+                "🎞 **মুভির নাম বা TMDB ID লিখে পাঠান** (যেমন: `RRR` বা `Pushpa 2` বা `579974`, সিরিজ হলে `tv:12345`):\n"
+                "TMDB থেকে অটোমেটিক পোস্টার ও সব ডিটেলস চলে আসবে!",
                 reply_markup=skip_kb
             )
         else:
             BLOGGER_STATES[user_id] = {"task_id": task_id, "step": "waiting_title"}
-            await query.message.reply_text("📝 **ধাপ ১/২: পোস্টের টাইটেল লিখে পাঠান:**")
+            await query.message.reply_text(
+                "⚠️ TMDB API Key সেট করা নেই (`/set_tmdb KEY`)।\n"
+                "📝 আপাতত **পোস্টের টাইটেল** লিখে পাঠান:"
+            )
         await query.answer()
 
     elif action == "wp_tmdb_skip":
@@ -593,7 +622,7 @@ async def save_tg_file_to_task(client: Client, message: Message, task_id: str, t
     await message.reply_text(
         f"✅ **{quality}** ফাইল যুক্ত হয়েছে! (`{pending['size']}`)\n"
         f"মোট ডাউনলোড বাটন: **{len(task['downloads'])} টি**\n\n"
-        f"আরও ফাইল যোগ করতে চাইলে নিচের বাটনে চাপ দিন, নাহলে পোস্ট তৈরি করুন:",
+        f"আরও ফাইল যোগ করতে চাইলে নিচের বাটনে চাপ দিন, নাহলে **Generate Blogger Post** চাপুন:",
         reply_markup=build_control_keyboard(task_id, task)
     )
 
@@ -616,7 +645,6 @@ async def blogger_multi_listener(client: Client, message: Message):
 
     step = state["step"]
 
-    # ১. Streamtape-এ নতুন Embed ভিডিও আপলোড
     if step == "waiting_embed_video" and (message.video or message.document):
         api_login, api_key = await get_api_credentials()
         media = message.video or message.document
@@ -642,7 +670,6 @@ async def blogger_multi_listener(client: Client, message: Message):
         else:
             await status_msg.edit_text("❌ আপলোড ব্যর্থ হয়েছে! আবার চেষ্টা করুন।")
 
-    # ২. সরাসরি Embed URL বা iframe পেস্ট
     elif step == "waiting_embed_url" and message.text:
         s_num = len(task["embeds"]) + 1
         task["embeds"].append({"url": message.text.strip(), "label": f"Server {s_num} (HD)"})
@@ -652,7 +679,6 @@ async def blogger_multi_listener(client: Client, message: Message):
             reply_markup=build_control_keyboard(task_id, task)
         )
 
-    # ৩. টেলিগ্রাম ফাইল ফরওয়ার্ড রিসিভ ও কোয়ালিটি জিজ্ঞাসা
     elif step == "waiting_tg_file" and (message.video or message.document):
         media = message.video or message.document
         file_name = getattr(media, "file_name", "Movie_File.mp4") or "Movie_File.mp4"
@@ -682,7 +708,6 @@ async def blogger_multi_listener(client: Client, message: Message):
             reply_markup=q_kb
         )
 
-    # ৪. কাস্টম কোয়ালিটি নাম গ্রহণ
     elif step == "waiting_custom_quality" and message.text:
         pending = task.pop("pending_file", None)
         BLOGGER_STATES.pop(user_id, None)
@@ -691,14 +716,16 @@ async def blogger_multi_listener(client: Client, message: Message):
         else:
             await message.reply_text("❌ কোনো পেন্ডিং ফাইল পাওয়া যায়নি!")
 
-    # ৫. TMDB সার্চ ও পোস্ট তৈরি
     elif step == "waiting_tmdb" and message.text:
         tmdb_key = await get_tmdb_key()
-        status_msg = await message.reply_text("🔍 **TMDB থেকে তথ্য আনা হচ্ছে...**")
-        info = await fetch_tmdb_data(message.text.strip(), tmdb_key)
+        status_msg = await message.reply_text("🔍 **TMDB থেকে পোস্টার ও সব ডিটেলস আনা হচ্ছে...**")
+        info, err = await fetch_tmdb_data(message.text.strip(), tmdb_key)
         if not info:
-            state["step"] = "waiting_title"
-            await status_msg.edit_text("❌ TMDB-তে পাওয়া যায়নি! দয়া করে **পোস্টের টাইটেল** ম্যানুয়ালি লিখে পাঠান:")
+            skip_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Manual Title & Poster", callback_data=f"wp_tmdb_skip|{task_id}")]])
+            await status_msg.edit_text(
+                f"❌ {err}\n\nআবার সঠিক নাম বা TMDB ID লিখে পাঠান, অথবা ম্যানুয়ালি করতে নিচের বাটনে চাপুন:",
+                reply_markup=skip_kb
+            )
             return
 
         task.update(info)
@@ -707,7 +734,6 @@ async def blogger_multi_listener(client: Client, message: Message):
         await generate_and_send_post(client, message, task_id, task)
         BLOGGER_TASKS.pop(task_id, None)
 
-    # ৬. ম্যানুয়াল টাইটেল গ্রহণ
     elif step == "waiting_title" and message.text:
         task["title"] = message.text.strip()
         state["step"] = "waiting_poster"
@@ -717,7 +743,6 @@ async def blogger_multi_listener(client: Client, message: Message):
             "একটি ছবি (Photo) পাঠান অথবা সরাসরি ছবির লিংক (`https://...`) দিন:"
         )
 
-    # ৭. ম্যানুয়াল পোস্টার (ছবি বা URL) গ্রহণ ও পোস্ট তৈরি
     elif step == "waiting_poster" and (message.photo or (message.text and message.text.startswith("http"))):
         if message.photo:
             poster_id = str(uuid.uuid4())[:8]
